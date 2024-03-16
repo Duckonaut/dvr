@@ -1,0 +1,5 @@
+build/
+release/
+.cache/
+subprojects/*/
+!subprojects/packagefiles/

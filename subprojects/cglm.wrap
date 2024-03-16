@@ -1,0 +1,10 @@
+[wrap-file]
+directory = cglm-0.9.2
+source_url = https://github.com/recp/cglm/archive/refs/tags/v0.9.2.tar.gz
+source_filename = cglm-0.9.2.tar.gz
+source_hash = 5c0639fe125c00ffaa73be5eeecd6be999839401e76cf4ee05ac2883447a5b4d
+source_fallback_url = https://github.com/mesonbuild/wrapdb/releases/download/cglm_0.9.2-1/cglm-0.9.2.tar.gz
+wrapdb_version = 0.9.2-1
+
+[provide]
+cglm = cglm_dep

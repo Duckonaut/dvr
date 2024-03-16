@@ -1,0 +1,11 @@
+[wrap-git]
+directory = cimgui-master
+url = https://github.com/cimgui/cimgui.git
+revision = head
+depth = 1
+clone-recursive = true
+patch_directory = cimgui-mesonify
+
+[provide]
+cimgui = cimgui_dep
+
