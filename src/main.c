@@ -17,6 +17,7 @@
 #include <windows.h>
 #else
 #include <unistd.h>
+#include <time.h>
 #endif
 
 DVR_RESULT(i32) dvr_init(void);
@@ -90,10 +91,12 @@ int main(void) {
 #else
 #define DVR_ENABLE_VALIDATION_LAYERS true
 #endif
+#define DVR_MAX_FRAMES_IN_FLIGHT 2
 
 typedef struct dvr_state {
     struct {
         GLFWwindow* window;
+        bool just_resized;
     } window;
     struct {
         VkInstance instance;
@@ -113,27 +116,41 @@ typedef struct dvr_state {
         VkPipelineLayout pipeline_layout;
         VkPipeline pipeline;
         VkCommandPool command_pool;
-        VkCommandBuffer command_buffer;
-        VkSemaphore image_available_sem;
-        VkSemaphore render_finished_sem;
-        VkFence in_flight_fence;
+        VkCommandBuffer command_buffers[DVR_MAX_FRAMES_IN_FLIGHT];
+        VkSemaphore image_available_sems[DVR_MAX_FRAMES_IN_FLIGHT];
+        VkSemaphore render_finished_sems[DVR_MAX_FRAMES_IN_FLIGHT];
+        VkFence in_flight_fences[DVR_MAX_FRAMES_IN_FLIGHT];
+        u32 current_frame;
     } vk;
+    struct {
+        f32 total;
+        f32 delta;
+        u64 frames;
+        u64 frames_in_second;
+
+        f64 start;
+        f64 last;
+    } time;
 } dvr_state;
 
 static dvr_state g_dvr_state;
-
 
 void dvr_term_handler(int signum) {
     (void)signum;
     glfwSetWindowShouldClose(g_dvr_state.window.window, GLFW_TRUE);
 }
 
+static void dvr_glfw_resize(GLFWwindow* window, int width, int height) {
+    (void)window;
+    (void)width;
+    (void)height;
+    g_dvr_state.window.just_resized = true;
+}
 
 static DVR_RESULT(i32) dvr_init_window(void) {
     glfwInit();
 
     glfwWindowHint(GLFW_CLIENT_API, GLFW_NO_API);
-    glfwWindowHint(GLFW_RESIZABLE, GLFW_FALSE);
     glfwWindowHint(GLFW_VISIBLE, GLFW_TRUE);
     glfwWindowHint(GLFW_DECORATED, GLFW_TRUE);
     if (glfwPlatformSupported(GLFW_PLATFORM_WAYLAND)) {
@@ -142,6 +159,8 @@ static DVR_RESULT(i32) dvr_init_window(void) {
     }
     g_dvr_state.window.window =
         glfwCreateWindow(DVR_WINDOW_WIDTH, DVR_WINDOW_HEIGHT, DVR_WINDOW_NAME, NULL, NULL);
+
+    glfwSetFramebufferSizeCallback(g_dvr_state.window.window, dvr_glfw_resize);
 
     return DVR_OK(i32, 0);
 }
@@ -886,8 +905,10 @@ static DVR_RESULT(i32) dvr_vk_create_graphics_pipeline(void) {
     DVR_BUBBLE_INTO(i32, fs_code_res);
     dvr_range fs_code = DVR_UNWRAP(fs_code_res);
 
-    VkShaderModule vs_shader_module = DVR_UNWRAP(dvr_create_shader_module(vs_code));
-    VkShaderModule fs_shader_module = DVR_UNWRAP(dvr_create_shader_module(fs_code));
+    DVR_RESULT(VkShaderModule) vs_shader_module_res = dvr_create_shader_module(vs_code);
+    DVR_RESULT(VkShaderModule) fs_shader_module_res = dvr_create_shader_module(fs_code);
+    VkShaderModule vs_shader_module = DVR_UNWRAP(vs_shader_module_res);
+    VkShaderModule fs_shader_module = DVR_UNWRAP(fs_shader_module_res);
 
     VkPipelineShaderStageCreateInfo vs_create_info = {
         .sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO,
@@ -1111,13 +1132,13 @@ static DVR_RESULT(i32) dvr_vk_create_command_buffer(void) {
         .sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO,
         .commandPool = g_dvr_state.vk.command_pool,
         .level = VK_COMMAND_BUFFER_LEVEL_PRIMARY,
-        .commandBufferCount = 1,
+        .commandBufferCount = DVR_MAX_FRAMES_IN_FLIGHT,
     };
 
     if (vkAllocateCommandBuffers(
             g_dvr_state.vk.device,
             &alloc_info,
-            &g_dvr_state.vk.command_buffer
+            g_dvr_state.vk.command_buffers
         ) != VK_SUCCESS) {
         return DVR_ERROR(i32, "failed to allocate command buffers");
     }
@@ -1135,25 +1156,27 @@ static DVR_RESULT(i32) dvr_vk_create_sync_objects(void) {
         .flags = VK_FENCE_CREATE_SIGNALED_BIT,
     };
 
-    if (vkCreateSemaphore(
-            g_dvr_state.vk.device,
-            &sem_info,
-            nullptr,
-            &g_dvr_state.vk.image_available_sem
-        ) != VK_SUCCESS ||
-        vkCreateSemaphore(
-            g_dvr_state.vk.device,
-            &sem_info,
-            nullptr,
-            &g_dvr_state.vk.render_finished_sem
-        ) != VK_SUCCESS ||
-        vkCreateFence(
-            g_dvr_state.vk.device,
-            &fence_info,
-            nullptr,
-            &g_dvr_state.vk.in_flight_fence
-        ) != VK_SUCCESS) {
-        return DVR_ERROR(i32, "failed to create sync objects");
+    for (usize i = 0; i < DVR_MAX_FRAMES_IN_FLIGHT; i++) {
+        if (vkCreateSemaphore(
+                g_dvr_state.vk.device,
+                &sem_info,
+                nullptr,
+                &g_dvr_state.vk.image_available_sems[i]
+            ) != VK_SUCCESS ||
+            vkCreateSemaphore(
+                g_dvr_state.vk.device,
+                &sem_info,
+                nullptr,
+                &g_dvr_state.vk.render_finished_sems[i]
+            ) != VK_SUCCESS ||
+            vkCreateFence(
+                g_dvr_state.vk.device,
+                &fence_info,
+                nullptr,
+                &g_dvr_state.vk.in_flight_fences[i]
+            ) != VK_SUCCESS) {
+            return DVR_ERROR(i32, "failed to create sync objects");
+        }
     }
 
     return DVR_OK(i32, 0);
@@ -1218,6 +1241,58 @@ DVR_RESULT(i32) dvr_init(void) {
     DVR_BUBBLE(result);
 
     DVRLOG_INFO("vulkan initialized");
+
+#ifdef __linux__
+    // set the starting time for the frame timer
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+
+    g_dvr_state.time.start = (f64)ts.tv_sec + (f64)ts.tv_nsec / 1e9;
+    g_dvr_state.time.last = g_dvr_state.time.start;
+#endif
+
+    return DVR_OK(i32, 0);
+}
+
+static void dvr_vk_cleanup_swapchain(void);
+
+static DVR_RESULT(i32) dvr_vk_recreate_swapchain(void) {
+    i32 width = 0;
+    i32 height = 0;
+    glfwGetFramebufferSize(g_dvr_state.window.window, &width, &height);
+    while (width == 0 || height == 0) {
+        glfwGetFramebufferSize(g_dvr_state.window.window, &width, &height);
+        glfwWaitEvents();
+    }
+
+    vkDeviceWaitIdle(g_dvr_state.vk.device);
+
+    VkFormat old_format = g_dvr_state.vk.swapchain_format;
+
+    dvr_vk_cleanup_swapchain();
+
+    DVR_RESULT(i32) result = dvr_vk_create_swapchain();
+    DVR_BUBBLE(result);
+
+    bool swapchain_format_changed = old_format != g_dvr_state.vk.swapchain_format;
+
+    result = dvr_vk_create_swapchain_image_views();
+    DVR_BUBBLE(result);
+
+    if (swapchain_format_changed) {
+        vkDestroyRenderPass(g_dvr_state.vk.device, g_dvr_state.vk.render_pass, NULL);
+
+        result = dvr_vk_create_render_pass();
+        DVR_BUBBLE(result);
+
+        vkDestroyPipeline(g_dvr_state.vk.device, g_dvr_state.vk.pipeline, NULL);
+
+        result = dvr_vk_create_graphics_pipeline();
+        DVR_BUBBLE(result);
+    }
+
+    result = dvr_vk_create_framebuffers();
+    DVR_BUBBLE(result);
 
     return DVR_OK(i32, 0);
 }
@@ -1291,26 +1366,42 @@ static DVR_RESULT(i32) dvr_draw_frame(void) {
     vkWaitForFences(
         g_dvr_state.vk.device,
         1,
-        &g_dvr_state.vk.in_flight_fence,
+        &g_dvr_state.vk.in_flight_fences[g_dvr_state.vk.current_frame],
         VK_TRUE,
         UINT64_MAX
     );
-    vkResetFences(g_dvr_state.vk.device, 1, &g_dvr_state.vk.in_flight_fence);
 
     u32 image_index;
-    vkAcquireNextImageKHR(
+    VkResult result = vkAcquireNextImageKHR(
         g_dvr_state.vk.device,
         g_dvr_state.vk.swapchain,
         UINT64_MAX,
-        g_dvr_state.vk.image_available_sem,
+        g_dvr_state.vk.image_available_sems[g_dvr_state.vk.current_frame],
         VK_NULL_HANDLE,
         &image_index
     );
 
-    vkResetCommandBuffer(g_dvr_state.vk.command_buffer, 0);
+    if (result == VK_ERROR_OUT_OF_DATE_KHR) {
+        DVR_RESULT(i32) res = dvr_vk_recreate_swapchain();
+        DVR_BUBBLE(res);
+        return DVR_OK(i32, 0);
+    } else if (result != VK_SUCCESS && result != VK_SUBOPTIMAL_KHR) {
+        return DVR_ERROR(i32, "failed to acquire swapchain image");
+    }
+
+    vkResetFences(
+        g_dvr_state.vk.device,
+        1,
+        &g_dvr_state.vk.in_flight_fences[g_dvr_state.vk.current_frame]
+    );
+
+    vkResetCommandBuffer(g_dvr_state.vk.command_buffers[g_dvr_state.vk.current_frame], 0);
 
     DVR_RESULT(i32)
-    res = dvr_vk_record_command_buffer(g_dvr_state.vk.command_buffer, image_index);
+    res = dvr_vk_record_command_buffer(
+        g_dvr_state.vk.command_buffers[g_dvr_state.vk.current_frame],
+        image_index
+    );
     DVR_BUBBLE(res);
 
     VkSubmitInfo submit_info = {
@@ -1318,18 +1409,20 @@ static DVR_RESULT(i32) dvr_draw_frame(void) {
         .pWaitDstStageMask =
             (VkPipelineStageFlags[]){ VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT },
         .commandBufferCount = 1,
-        .pCommandBuffers = &g_dvr_state.vk.command_buffer,
+        .pCommandBuffers = &g_dvr_state.vk.command_buffers[g_dvr_state.vk.current_frame],
         .waitSemaphoreCount = 1,
-        .pWaitSemaphores = (VkSemaphore[]){ g_dvr_state.vk.image_available_sem },
+        .pWaitSemaphores = (VkSemaphore[]
+        ){ g_dvr_state.vk.image_available_sems[g_dvr_state.vk.current_frame] },
         .signalSemaphoreCount = 1,
-        .pSignalSemaphores = (VkSemaphore[]){ g_dvr_state.vk.render_finished_sem },
+        .pSignalSemaphores = (VkSemaphore[]
+        ){ g_dvr_state.vk.render_finished_sems[g_dvr_state.vk.current_frame] },
     };
 
     if (vkQueueSubmit(
             g_dvr_state.vk.graphics_queue,
             1,
             &submit_info,
-            g_dvr_state.vk.in_flight_fence
+            g_dvr_state.vk.in_flight_fences[g_dvr_state.vk.current_frame]
         ) != VK_SUCCESS) {
         return DVR_ERROR(i32, "failed to submit draw command buffer");
     }
@@ -1337,14 +1430,27 @@ static DVR_RESULT(i32) dvr_draw_frame(void) {
     VkPresentInfoKHR present_info = {
         .sType = VK_STRUCTURE_TYPE_PRESENT_INFO_KHR,
         .waitSemaphoreCount = 1,
-        .pWaitSemaphores = (VkSemaphore[]){ g_dvr_state.vk.render_finished_sem },
+        .pWaitSemaphores = (VkSemaphore[]
+        ){ g_dvr_state.vk.render_finished_sems[g_dvr_state.vk.current_frame] },
         .swapchainCount = 1,
         .pSwapchains = (VkSwapchainKHR[]){ g_dvr_state.vk.swapchain },
         .pImageIndices = &image_index,
         .pResults = NULL
     };
 
-    vkQueuePresentKHR(g_dvr_state.vk.present_queue, &present_info);
+    result = vkQueuePresentKHR(g_dvr_state.vk.present_queue, &present_info);
+    if (result == VK_ERROR_OUT_OF_DATE_KHR || result == VK_SUBOPTIMAL_KHR ||
+        g_dvr_state.window.just_resized) {
+        g_dvr_state.window.just_resized = false;
+        DVR_RESULT(i32) res = dvr_vk_recreate_swapchain();
+        DVR_BUBBLE(res);
+        return DVR_OK(i32, 0);
+    } else if (result != VK_SUCCESS) {
+        return DVR_ERROR(i32, "failed to present swapchain image");
+    }
+
+    g_dvr_state.vk.current_frame =
+        (g_dvr_state.vk.current_frame + 1) % DVR_MAX_FRAMES_IN_FLIGHT;
 
     return DVR_OK(i32, 0);
 }
@@ -1358,16 +1464,33 @@ void dvr_main_loop(void) {
             DVR_SHOW_ERROR(res);
             glfwSetWindowShouldClose(g_dvr_state.window.window, GLFW_TRUE);
         }
+
+        f64 last_total = g_dvr_state.time.total;
+#ifdef __linux__
+        // update the time for the frame timer
+        struct timespec ts;
+        clock_gettime(CLOCK_MONOTONIC, &ts);
+
+        g_dvr_state.time.delta =
+            (f32)((f64)ts.tv_sec + (f64)ts.tv_nsec / 1e9 - g_dvr_state.time.last);
+        g_dvr_state.time.last = (f64)ts.tv_sec + (f64)ts.tv_nsec / 1e9;
+        g_dvr_state.time.total =
+            (f32)((f64)ts.tv_sec + (f64)ts.tv_nsec / 1e9 - g_dvr_state.time.start);
+#endif
+
+        g_dvr_state.time.frames++;
+        g_dvr_state.time.frames_in_second++;
+
+        if ((i32)last_total != (i32)g_dvr_state.time.total) {
+            DVRLOG_INFO("fps: %zu", g_dvr_state.time.frames_in_second);
+            g_dvr_state.time.frames_in_second = 0;
+        }
     }
 
     vkDeviceWaitIdle(g_dvr_state.vk.device);
 }
 
-void dvr_cleanup_vulkan(void) {
-    vkDestroySemaphore(g_dvr_state.vk.device, g_dvr_state.vk.image_available_sem, NULL);
-    vkDestroySemaphore(g_dvr_state.vk.device, g_dvr_state.vk.render_finished_sem, NULL);
-    vkDestroyFence(g_dvr_state.vk.device, g_dvr_state.vk.in_flight_fence, NULL);
-    vkDestroyCommandPool(g_dvr_state.vk.device, g_dvr_state.vk.command_pool, NULL);
+static void dvr_vk_cleanup_swapchain(void) {
     for (usize i = 0; i < arrlenu(g_dvr_state.vk.swapchain_framebuffers); i++) {
         vkDestroyFramebuffer(
             g_dvr_state.vk.device,
@@ -1375,9 +1498,6 @@ void dvr_cleanup_vulkan(void) {
             NULL
         );
     }
-    vkDestroyPipeline(g_dvr_state.vk.device, g_dvr_state.vk.pipeline, NULL);
-    vkDestroyPipelineLayout(g_dvr_state.vk.device, g_dvr_state.vk.pipeline_layout, NULL);
-    vkDestroyRenderPass(g_dvr_state.vk.device, g_dvr_state.vk.render_pass, NULL);
     for (usize i = 0; i < arrlenu(g_dvr_state.vk.swapchain_image_views); i++) {
         vkDestroyImageView(
             g_dvr_state.vk.device,
@@ -1386,6 +1506,21 @@ void dvr_cleanup_vulkan(void) {
         );
     }
     vkDestroySwapchainKHR(g_dvr_state.vk.device, g_dvr_state.vk.swapchain, NULL);
+}
+
+void dvr_cleanup_vulkan(void) {
+    for (usize i = 0; i < DVR_MAX_FRAMES_IN_FLIGHT; i++) {
+        vkDestroySemaphore(g_dvr_state.vk.device, g_dvr_state.vk.image_available_sems[i], NULL);
+        vkDestroySemaphore(g_dvr_state.vk.device, g_dvr_state.vk.render_finished_sems[i], NULL);
+        vkDestroyFence(g_dvr_state.vk.device, g_dvr_state.vk.in_flight_fences[i], NULL);
+    }
+    vkDestroyCommandPool(g_dvr_state.vk.device, g_dvr_state.vk.command_pool, NULL);
+
+    dvr_vk_cleanup_swapchain();
+
+    vkDestroyPipeline(g_dvr_state.vk.device, g_dvr_state.vk.pipeline, NULL);
+    vkDestroyRenderPass(g_dvr_state.vk.device, g_dvr_state.vk.render_pass, NULL);
+    vkDestroyPipelineLayout(g_dvr_state.vk.device, g_dvr_state.vk.pipeline_layout, NULL);
     vkDestroySurfaceKHR(g_dvr_state.vk.instance, g_dvr_state.vk.surface, NULL);
     if (DVR_ENABLE_VALIDATION_LAYERS) {
         PFN_vkDestroyDebugUtilsMessengerEXT vkDestroyDebugUtilsMessengerEXT =
