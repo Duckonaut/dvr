@@ -219,7 +219,7 @@ static const u16 k_indices[] = {
 };
 // clang-format on
 //
-#define GRID_SIZE 100
+#define GRID_SIZE 220
 
 typedef struct dvr_view_uniform {
     mat4 model;
@@ -262,9 +262,7 @@ static DVR_RESULT(i32) dvr_vk_create_buffer(
     VkMemoryRequirements mem_reqs;
     vkGetBufferMemoryRequirements(g_dvr_state.vk.device, *buffer, &mem_reqs);
 
-    DVR_RESULT(u32)
-    mem_type_id_res = find_memory_type(mem_reqs.memoryTypeBits, properties);
-
+    DVR_RESULT(u32) mem_type_id_res = find_memory_type(mem_reqs.memoryTypeBits, properties);
     DVR_BUBBLE_INTO(i32, mem_type_id_res);
 
     VkMemoryAllocateInfo alloc_info = {
@@ -1933,7 +1931,7 @@ static DVR_RESULT(i32) dvr_draw_frame(void) {
     dvr_view_uniform uniform = {};
     glm_perspective(90.0f, (f32)width / (f32)height, 0.0001f, 1000.0f, uniform.proj);
     glm_mat4_identity(uniform.view);
-    glm_translate_z(uniform.view, -80.0f);
+    glm_translate_z(uniform.view, -150.0f);
     glm_mat4_identity(uniform.model);
     glm_rotate_y(uniform.model, g_dvr_state.time.total, uniform.model);
 
@@ -1949,11 +1947,15 @@ static DVR_RESULT(i32) dvr_draw_frame(void) {
         .commandBufferCount = 1,
         .pCommandBuffers = &g_dvr_state.vk.command_buffers[g_dvr_state.vk.current_frame],
         .waitSemaphoreCount = 1,
-        .pWaitSemaphores = (VkSemaphore[]
-        ){ g_dvr_state.vk.image_available_sems[g_dvr_state.vk.current_frame] },
+        .pWaitSemaphores =
+            (VkSemaphore[]){
+                g_dvr_state.vk.image_available_sems[g_dvr_state.vk.current_frame],
+            },
         .signalSemaphoreCount = 1,
-        .pSignalSemaphores = (VkSemaphore[]
-        ){ g_dvr_state.vk.render_finished_sems[g_dvr_state.vk.current_frame] },
+        .pSignalSemaphores =
+            (VkSemaphore[]){
+                g_dvr_state.vk.render_finished_sems[g_dvr_state.vk.current_frame],
+            },
     };
 
     if (vkQueueSubmit(
