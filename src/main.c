@@ -79,6 +79,14 @@ int main(void) {
     return 0;
 }
 
+typedef struct dvr_buffer {
+    struct {
+        VkBuffer buffer;
+        VkDeviceMemory memory;
+    } vk;
+} dvr_buffer;
+DVR_RESULT_DEF(dvr_buffer);
+
 #define DVR_WINDOW_WIDTH 640
 #define DVR_WINDOW_HEIGHT 480
 #ifdef RELEASE
@@ -115,14 +123,13 @@ typedef struct dvr_state {
         VkRenderPass render_pass;
         VkPipelineLayout pipeline_layout;
         VkPipeline pipeline;
-        VkBuffer vertex_buffer;
-        VkDeviceMemory vertex_buffer_memory;
         VkCommandPool command_pool;
         VkCommandBuffer command_buffers[DVR_MAX_FRAMES_IN_FLIGHT];
         VkSemaphore image_available_sems[DVR_MAX_FRAMES_IN_FLIGHT];
         VkSemaphore render_finished_sems[DVR_MAX_FRAMES_IN_FLIGHT];
         VkFence in_flight_fences[DVR_MAX_FRAMES_IN_FLIGHT];
         u32 current_frame;
+        dvr_buffer vertex_buffer;
     } vk;
     struct {
         f32 total;
@@ -171,6 +178,161 @@ static const dvr_vertex k_vertices[] = {
     { .pos = { -0.5f, 0.5f }, .color = { 0.0f, 0.0f, 1.0f } },
     { .pos = { 0.5f, 0.5f }, .color = { 0.0f, 1.0f, 0.0f } },
 };
+
+static DVR_RESULT(u32) find_memory_type(u32 type_filter, VkMemoryPropertyFlags properties) {
+    VkPhysicalDeviceMemoryProperties mem_props;
+    vkGetPhysicalDeviceMemoryProperties(g_dvr_state.vk.physical_device, &mem_props);
+
+    for (u32 i = 0; i < mem_props.memoryTypeCount; i++) {
+        if (type_filter & (1 << i) && (mem_props.memoryTypes[i].propertyFlags & properties)) {
+            return DVR_OK(u32, i);
+        }
+    }
+
+    return DVR_ERROR(u32, "failed to find suitable memory type");
+}
+
+static DVR_RESULT(i32) dvr_vk_create_buffer(
+    VkDeviceSize size,
+    VkBufferUsageFlags usage,
+    VkMemoryPropertyFlags properties,
+    VkBuffer* buffer,
+    VkDeviceMemory* memory
+) {
+    VkBufferCreateInfo buffer_info = {
+        .sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO,
+        .size = size,
+        .usage = usage,
+        .sharingMode = VK_SHARING_MODE_EXCLUSIVE,
+        .flags = 0,
+    };
+
+    if (vkCreateBuffer(g_dvr_state.vk.device, &buffer_info, NULL, buffer) != VK_SUCCESS) {
+        return DVR_ERROR(i32, "failed to create vertex buffer");
+    }
+
+    VkMemoryRequirements mem_reqs;
+    vkGetBufferMemoryRequirements(g_dvr_state.vk.device, *buffer, &mem_reqs);
+
+    DVR_RESULT(u32)
+    mem_type_id_res = find_memory_type(mem_reqs.memoryTypeBits, properties);
+
+    DVR_BUBBLE_INTO(i32, mem_type_id_res);
+
+    VkMemoryAllocateInfo alloc_info = {
+        .sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO,
+        .allocationSize = mem_reqs.size,
+        .memoryTypeIndex = DVR_UNWRAP(mem_type_id_res),
+    };
+
+    if (vkAllocateMemory(g_dvr_state.vk.device, &alloc_info, NULL, memory) != VK_SUCCESS) {
+        return DVR_ERROR(i32, "failed to allocate vertex buffer memory");
+    }
+
+    vkBindBufferMemory(g_dvr_state.vk.device, *buffer, *memory, 0);
+
+    return DVR_OK(i32, 0);
+}
+
+static void dvr_vk_copy_buffer(VkBuffer src, VkBuffer dst, VkDeviceSize size) {
+    VkCommandBufferAllocateInfo alloc_info = {
+        .sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO,
+        .level = VK_COMMAND_BUFFER_LEVEL_PRIMARY,
+        .commandPool = g_dvr_state.vk.command_pool,
+        .commandBufferCount = 1,
+    };
+
+    VkCommandBuffer command_buffer;
+    vkAllocateCommandBuffers(g_dvr_state.vk.device, &alloc_info, &command_buffer);
+
+    VkCommandBufferBeginInfo begin_info = {
+        .sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO,
+        .flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT,
+    };
+
+    vkBeginCommandBuffer(command_buffer, &begin_info);
+
+    VkBufferCopy copy_region = {
+        .size = size,
+        .srcOffset = 0,
+        .dstOffset = 0,
+    };
+
+    vkCmdCopyBuffer(command_buffer, src, dst, 1, &copy_region);
+
+    vkEndCommandBuffer(command_buffer);
+
+    VkSubmitInfo submit_info = {
+        .sType = VK_STRUCTURE_TYPE_SUBMIT_INFO,
+        .commandBufferCount = 1,
+        .pCommandBuffers = &command_buffer,
+    };
+
+    vkQueueSubmit(g_dvr_state.vk.graphics_queue, 1, &submit_info, VK_NULL_HANDLE);
+    vkQueueWaitIdle(g_dvr_state.vk.graphics_queue);
+
+    vkFreeCommandBuffers(
+        g_dvr_state.vk.device,
+        g_dvr_state.vk.command_pool,
+        1,
+        &command_buffer
+    );
+}
+
+typedef struct dvr_buffer_desc {
+    dvr_range data;
+    VkBufferUsageFlags usage;
+} dvr_buffer_desc;
+
+DVR_RESULT(dvr_buffer) dvr_create_buffer(dvr_buffer_desc* desc) {
+    VkBuffer src_buffer;
+    VkDeviceMemory src_memory;
+
+    DVR_RESULT(i32)
+    result = dvr_vk_create_buffer(
+        desc->data.size,
+        VK_BUFFER_USAGE_TRANSFER_SRC_BIT,
+        VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
+        &src_buffer,
+        &src_memory
+    );
+    DVR_BUBBLE_INTO(dvr_buffer, result);
+
+    void* mapped;
+    vkMapMemory(g_dvr_state.vk.device, src_memory, 0, desc->data.size, 0, &mapped);
+    memcpy(mapped, desc->data.base, desc->data.size);
+    vkUnmapMemory(g_dvr_state.vk.device, src_memory);
+
+    VkBuffer dst_buffer;
+    VkDeviceMemory dst_memory;
+
+    result = dvr_vk_create_buffer(
+        desc->data.size,
+        VK_BUFFER_USAGE_TRANSFER_DST_BIT | desc->usage,
+        VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT,
+        &dst_buffer,
+        &dst_memory
+    );
+    DVR_BUBBLE_INTO(dvr_buffer, result);
+
+    // copy data to buffer
+    dvr_vk_copy_buffer(src_buffer, dst_buffer, (VkDeviceSize)desc->data.size);
+
+    dvr_buffer buf = {
+        .vk.buffer = dst_buffer,
+        .vk.memory = dst_memory,
+    };
+
+    vkDestroyBuffer(g_dvr_state.vk.device, src_buffer, NULL);
+    vkFreeMemory(g_dvr_state.vk.device, src_memory, NULL);
+
+    return DVR_OK(dvr_buffer, buf);
+}
+
+void dvr_destroy_buffer(dvr_buffer buffer) {
+    vkDestroyBuffer(g_dvr_state.vk.device, buffer.vk.buffer, NULL);
+    vkFreeMemory(g_dvr_state.vk.device, buffer.vk.memory, NULL);
+}
 
 void dvr_term_handler(int signum) {
     (void)signum;
@@ -1164,85 +1326,15 @@ static DVR_RESULT(i32) dvr_vk_create_command_pool(void) {
     return DVR_OK(i32, 0);
 }
 
-static DVR_RESULT(u32) find_memory_type(u32 type_filter, VkMemoryPropertyFlags properties) {
-    VkPhysicalDeviceMemoryProperties mem_props;
-    vkGetPhysicalDeviceMemoryProperties(g_dvr_state.vk.physical_device, &mem_props);
-
-    for (u32 i = 0; i < mem_props.memoryTypeCount; i++) {
-        if (type_filter & (1 << i) && (mem_props.memoryTypes[i].propertyFlags & properties)) {
-            return DVR_OK(u32, i);
-        }
-    }
-
-    return DVR_ERROR(u32, "failed to find suitable memory type");
-}
-
 static DVR_RESULT(i32) dvr_vk_create_vertex_buffer(void) {
-    VkBufferCreateInfo buffer_info = {
-        .sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO,
-        .size = sizeof(k_vertices),
+    DVR_RESULT(dvr_buffer)
+    vbuf = dvr_create_buffer(&(dvr_buffer_desc){
+        .data = DVR_RANGE(k_vertices),
         .usage = VK_BUFFER_USAGE_VERTEX_BUFFER_BIT,
-        .sharingMode = VK_SHARING_MODE_EXCLUSIVE,
-        .flags = 0,
-    };
+    });
+    DVR_BUBBLE_INTO(i32, vbuf);
 
-    if (vkCreateBuffer(
-            g_dvr_state.vk.device,
-            &buffer_info,
-            NULL,
-            &g_dvr_state.vk.vertex_buffer
-        ) != VK_SUCCESS) {
-        return DVR_ERROR(i32, "failed to create vertex buffer");
-    }
-
-    VkMemoryRequirements mem_reqs;
-    vkGetBufferMemoryRequirements(
-        g_dvr_state.vk.device,
-        g_dvr_state.vk.vertex_buffer,
-        &mem_reqs
-    );
-
-    DVR_RESULT(u32)
-    mem_type_id_res = find_memory_type(
-        mem_reqs.memoryTypeBits,
-        VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT
-    );
-
-    DVR_BUBBLE_INTO(i32, mem_type_id_res);
-
-    VkMemoryAllocateInfo alloc_info = {
-        .sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO,
-        .allocationSize = mem_reqs.size,
-        .memoryTypeIndex = DVR_UNWRAP(mem_type_id_res),
-    };
-
-    if (vkAllocateMemory(
-            g_dvr_state.vk.device,
-            &alloc_info,
-            NULL,
-            &g_dvr_state.vk.vertex_buffer_memory
-        ) != VK_SUCCESS) {
-        return DVR_ERROR(i32, "failed to allocate vertex buffer memory");
-    }
-
-    vkBindBufferMemory(
-        g_dvr_state.vk.device,
-        g_dvr_state.vk.vertex_buffer,
-        g_dvr_state.vk.vertex_buffer_memory,
-        0
-    );
-
-    void* data;
-    vkMapMemory(
-        g_dvr_state.vk.device,
-        g_dvr_state.vk.vertex_buffer_memory,
-        0,
-        buffer_info.size,
-        0,
-        &data
-    );
-    memcpy(data, k_vertices, (usize)buffer_info.size);
-    vkUnmapMemory(g_dvr_state.vk.device, g_dvr_state.vk.vertex_buffer_memory);
+    g_dvr_state.vk.vertex_buffer = DVR_UNWRAP(vbuf);
 
     return DVR_OK(i32, 0);
 }
@@ -1409,6 +1501,7 @@ static DVR_RESULT(i32) dvr_vk_recreate_swapchain(void) {
         DVR_BUBBLE(result);
 
         vkDestroyPipeline(g_dvr_state.vk.device, g_dvr_state.vk.pipeline, NULL);
+        vkDestroyPipelineLayout(g_dvr_state.vk.device, g_dvr_state.vk.pipeline_layout, NULL);
 
         result = dvr_vk_create_graphics_pipeline();
         DVR_BUBBLE(result);
@@ -1474,7 +1567,7 @@ static DVR_RESULT(i32)
         }
     );
 
-    VkBuffer vertex_buffers[] = { g_dvr_state.vk.vertex_buffer };
+    VkBuffer vertex_buffers[] = { g_dvr_state.vk.vertex_buffer.vk.buffer };
     VkDeviceSize offsets[] = { 0 };
     vkCmdBindVertexBuffers(command_buffer, 0, 1, vertex_buffers, offsets);
 
@@ -1638,8 +1731,7 @@ static void dvr_vk_cleanup_swapchain(void) {
 void dvr_cleanup_vulkan(void) {
     dvr_vk_cleanup_swapchain();
 
-    vkDestroyBuffer(g_dvr_state.vk.device, g_dvr_state.vk.vertex_buffer, NULL);
-    vkFreeMemory(g_dvr_state.vk.device, g_dvr_state.vk.vertex_buffer_memory, NULL);
+    dvr_destroy_buffer(g_dvr_state.vk.vertex_buffer);
 
     for (usize i = 0; i < DVR_MAX_FRAMES_IN_FLIGHT; i++) {
         vkDestroySemaphore(g_dvr_state.vk.device, g_dvr_state.vk.image_available_sems[i], NULL);
