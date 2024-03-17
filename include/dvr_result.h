@@ -115,4 +115,5 @@ typedef struct {
 #define DVR_RESULT_IS_ERROR(result) (!result.is_ok)
 
 DVR_RESULT_DEF(i32);
+DVR_RESULT_DEF(u32);
 DVR_RESULT_DEF(dvr_range);
