@@ -140,6 +140,7 @@ typedef struct dvr_state {
         VkFence in_flight_fences[DVR_MAX_FRAMES_IN_FLIGHT];
         u32 current_frame;
         dvr_buffer vertex_buffer;
+        dvr_buffer instance_buffer;
         dvr_buffer index_buffer;
         dvr_buffer uniform_buffers[DVR_MAX_FRAMES_IN_FLIGHT];
         VkDescriptorSet descriptor_sets[DVR_MAX_FRAMES_IN_FLIGHT];
@@ -162,13 +163,20 @@ typedef struct dvr_vertex {
     vec3 color;
 } dvr_vertex;
 
-static const VkVertexInputBindingDescription dvr_vertex_binding_description = {
-    .binding = 0,
-    .stride = sizeof(dvr_vertex),
-    .inputRate = VK_VERTEX_INPUT_RATE_VERTEX,
+static const VkVertexInputBindingDescription k_vertex_binding_descriptions[] = {
+    {
+        .binding = 0,
+        .stride = sizeof(dvr_vertex),
+        .inputRate = VK_VERTEX_INPUT_RATE_VERTEX,
+    },
+    {
+        .binding = 1,
+        .stride = sizeof(vec3),
+        .inputRate = VK_VERTEX_INPUT_RATE_INSTANCE,
+    },
 };
 
-static const VkVertexInputAttributeDescription dvr_vertex_attribute_descriptions[] = {
+static const VkVertexInputAttributeDescription k_vertex_attribute_descriptions[] = {
     {
         .location = 0,
         .binding = 0,
@@ -180,6 +188,12 @@ static const VkVertexInputAttributeDescription dvr_vertex_attribute_descriptions
         .binding = 0,
         .format = VK_FORMAT_R32G32B32_SFLOAT,
         .offset = offsetof(dvr_vertex, color),
+    },
+    {
+        .location = 2,
+        .binding = 1,
+        .format = VK_FORMAT_R32G32B32_SFLOAT,
+        .offset = 0,
     },
 };
 
@@ -204,6 +218,8 @@ static const u16 k_indices[] = {
     5, 0, 2,
 };
 // clang-format on
+//
+#define GRID_SIZE 100
 
 typedef struct dvr_view_uniform {
     mat4 model;
@@ -1255,10 +1271,10 @@ static DVR_RESULT(i32) dvr_vk_create_graphics_pipeline(void) {
 
     VkPipelineVertexInputStateCreateInfo vertex_input_info = {
         .sType = VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO,
-        .vertexBindingDescriptionCount = 1,
-        .pVertexBindingDescriptions = &dvr_vertex_binding_description,
-        .vertexAttributeDescriptionCount = 2,
-        .pVertexAttributeDescriptions = dvr_vertex_attribute_descriptions,
+        .vertexBindingDescriptionCount = 2,
+        .pVertexBindingDescriptions = k_vertex_binding_descriptions,
+        .vertexAttributeDescriptionCount = 3,
+        .pVertexAttributeDescriptions = k_vertex_attribute_descriptions,
     };
 
     VkPipelineInputAssemblyStateCreateInfo input_assembly = {
@@ -1450,6 +1466,36 @@ static DVR_RESULT(i32) dvr_vk_create_vertex_buffer(void) {
     DVR_BUBBLE_INTO(i32, vbuf);
 
     g_dvr_state.vk.vertex_buffer = DVR_UNWRAP(vbuf);
+
+    vec3* instance_data = malloc(GRID_SIZE * GRID_SIZE * GRID_SIZE * sizeof(vec3));
+    for (usize z = 0; z < GRID_SIZE; z++) {
+        for (usize y = 0; y < GRID_SIZE; y++) {
+            for (usize x = 0; x < GRID_SIZE; x++) {
+                instance_data[z * GRID_SIZE * GRID_SIZE + y * GRID_SIZE + x][0] =
+                    (f32)x - (f32)GRID_SIZE / 2;
+                instance_data[z * GRID_SIZE * GRID_SIZE + y * GRID_SIZE + x][1] =
+                    (f32)y - (f32)GRID_SIZE / 2;
+                instance_data[z * GRID_SIZE * GRID_SIZE + y * GRID_SIZE + x][2] =
+                    (f32)z - (f32)GRID_SIZE / 2;
+            }
+        }
+    }
+
+    DVR_RESULT(dvr_buffer)
+    instbuf = dvr_create_buffer(&(dvr_buffer_desc){
+        .data =
+            (dvr_range){
+                .base = instance_data,
+                .size = GRID_SIZE * GRID_SIZE * GRID_SIZE * sizeof(vec3),
+            },
+        .usage = VK_BUFFER_USAGE_VERTEX_BUFFER_BIT,
+        .lifecycle = DVR_BUFFER_LIFECYCLE_STATIC,
+    });
+    DVR_BUBBLE_INTO(i32, instbuf);
+
+    g_dvr_state.vk.instance_buffer = DVR_UNWRAP(instbuf);
+
+    free(instance_data);
 
     return DVR_OK(i32, 0);
 }
@@ -1801,9 +1847,10 @@ static DVR_RESULT(i32)
         }
     );
 
-    VkBuffer vertex_buffers[] = { g_dvr_state.vk.vertex_buffer.vk.buffer };
-    VkDeviceSize offsets[] = { 0 };
-    vkCmdBindVertexBuffers(command_buffer, 0, 1, vertex_buffers, offsets);
+    VkBuffer vertex_buffers[] = { g_dvr_state.vk.vertex_buffer.vk.buffer,
+                                  g_dvr_state.vk.instance_buffer.vk.buffer };
+    VkDeviceSize offsets[] = { 0, 0 };
+    vkCmdBindVertexBuffers(command_buffer, 0, 2, vertex_buffers, offsets);
     vkCmdBindIndexBuffer(
         command_buffer,
         g_dvr_state.vk.index_buffer.vk.buffer,
@@ -1824,7 +1871,7 @@ static DVR_RESULT(i32)
     vkCmdDrawIndexed(
         command_buffer,
         (u32)(sizeof(k_indices) / sizeof(k_indices[0])),
-        1,
+        GRID_SIZE * GRID_SIZE * GRID_SIZE,
         0,
         0,
         0
@@ -1885,9 +1932,8 @@ static DVR_RESULT(i32) dvr_draw_frame(void) {
     glfwGetFramebufferSize(g_dvr_state.window.window, &width, &height);
     dvr_view_uniform uniform = {};
     glm_perspective(90.0f, (f32)width / (f32)height, 0.0001f, 1000.0f, uniform.proj);
-    // uniform.proj[1][1] = -1;
     glm_mat4_identity(uniform.view);
-    glm_translate_z(uniform.view, -1.0f);
+    glm_translate_z(uniform.view, -80.0f);
     glm_mat4_identity(uniform.model);
     glm_rotate_y(uniform.model, g_dvr_state.time.total, uniform.model);
 
@@ -1922,8 +1968,10 @@ static DVR_RESULT(i32) dvr_draw_frame(void) {
     VkPresentInfoKHR present_info = {
         .sType = VK_STRUCTURE_TYPE_PRESENT_INFO_KHR,
         .waitSemaphoreCount = 1,
-        .pWaitSemaphores = (VkSemaphore[]
-        ){ g_dvr_state.vk.render_finished_sems[g_dvr_state.vk.current_frame] },
+        .pWaitSemaphores =
+            (VkSemaphore[]){
+                g_dvr_state.vk.render_finished_sems[g_dvr_state.vk.current_frame],
+            },
         .swapchainCount = 1,
         .pSwapchains = (VkSwapchainKHR[]){ g_dvr_state.vk.swapchain },
         .pImageIndices = &image_index,
