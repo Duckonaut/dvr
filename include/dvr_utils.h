@@ -39,6 +39,10 @@ typedef struct dvr_range {
 
 #define DVR_RANGE(value)                                                                       \
     (dvr_range) {                                                                              \
-        .base = (void*)&value, .size = sizeof(value)                                                  \
+        .base = (void*)&value, .size = sizeof(value)                                           \
     }
 
+#define DVR_RANGE_NULL                                                                         \
+    (dvr_range) {                                                                              \
+        .base = NULL, .size = 0                                                                \
+    }

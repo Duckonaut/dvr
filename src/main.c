@@ -79,10 +79,17 @@ int main(void) {
     return 0;
 }
 
+typedef enum dvr_buffer_lifecycle {
+    DVR_BUFFER_LIFECYCLE_STATIC,
+    DVR_BUFFER_LIFECYCLE_DYNAMIC,
+} dvr_buffer_lifecycle;
+
 typedef struct dvr_buffer {
+    dvr_buffer_lifecycle lifecycle;
     struct {
         VkBuffer buffer;
         VkDeviceMemory memory;
+        void* memmap;
     } vk;
 } dvr_buffer;
 DVR_RESULT_DEF(dvr_buffer);
@@ -121,15 +128,21 @@ typedef struct dvr_state {
         VkFormat swapchain_format;
         VkExtent2D swapchain_extent;
         VkRenderPass render_pass;
+        VkDescriptorPool descriptor_pool;
+        VkDescriptorSetLayout descriptor_set_layout;
         VkPipelineLayout pipeline_layout;
         VkPipeline pipeline;
         VkCommandPool command_pool;
+        dvr_buffer uniform_buffers_mapped;
         VkCommandBuffer command_buffers[DVR_MAX_FRAMES_IN_FLIGHT];
         VkSemaphore image_available_sems[DVR_MAX_FRAMES_IN_FLIGHT];
         VkSemaphore render_finished_sems[DVR_MAX_FRAMES_IN_FLIGHT];
         VkFence in_flight_fences[DVR_MAX_FRAMES_IN_FLIGHT];
         u32 current_frame;
         dvr_buffer vertex_buffer;
+        dvr_buffer index_buffer;
+        dvr_buffer uniform_buffers[DVR_MAX_FRAMES_IN_FLIGHT];
+        VkDescriptorSet descriptor_sets[DVR_MAX_FRAMES_IN_FLIGHT];
     } vk;
     struct {
         f32 total;
@@ -145,7 +158,7 @@ typedef struct dvr_state {
 static dvr_state g_dvr_state;
 
 typedef struct dvr_vertex {
-    vec2 pos;
+    vec3 pos;
     vec3 color;
 } dvr_vertex;
 
@@ -159,7 +172,7 @@ static const VkVertexInputAttributeDescription dvr_vertex_attribute_descriptions
     {
         .location = 0,
         .binding = 0,
-        .format = VK_FORMAT_R32G32_SFLOAT,
+        .format = VK_FORMAT_R32G32B32_SFLOAT,
         .offset = offsetof(dvr_vertex, pos),
     },
     {
@@ -171,13 +184,32 @@ static const VkVertexInputAttributeDescription dvr_vertex_attribute_descriptions
 };
 
 static const dvr_vertex k_vertices[] = {
-    { .pos = { 0.0f, -0.5f }, .color = { 1.0f, 0.0f, 0.0f } },
-    { .pos = { 0.5f, 0.5f }, .color = { 0.0f, 1.0f, 0.0f } },
-    { .pos = { -0.5f, 0.5f }, .color = { 0.0f, 0.0f, 1.0f } },
-    { .pos = { 0.0f, 0.8f }, .color = { 0.0f, 1.0f, 1.0f } },
-    { .pos = { -0.5f, 0.5f }, .color = { 0.0f, 0.0f, 1.0f } },
-    { .pos = { 0.5f, 0.5f }, .color = { 0.0f, 1.0f, 0.0f } },
+    { .pos = { 0.0f, -0.5f, 0.0f }, .color = { 1.0f, 0.0f, 0.0f } },
+    { .pos = { 0.5f, 0.5f, 0.0f }, .color = { 0.0f, 1.0f, 0.0f } },
+    { .pos = { -0.5f, 0.5f, 0.0f }, .color = { 0.0f, 0.0f, 1.0f } },
+    { .pos = { 0.0f, 0.8f, 0.0f }, .color = { 0.0f, 1.0f, 1.0f } },
+    { .pos = { 0.0f, 0.5f, 0.25f }, .color = { 1.0f, 0.0f, 1.0f } },
+    { .pos = { 0.0f, 0.5f, -0.25f }, .color = { 1.0f, 1.0f, 0.0f } },
 };
+
+// clang-format off
+static const u16 k_indices[] = {
+    4, 0, 1,
+    4, 1, 3,
+    4, 3, 2,
+    4, 2, 0,
+    5, 1, 0,
+    5, 3, 1,
+    5, 2, 3,
+    5, 0, 2,
+};
+// clang-format on
+
+typedef struct dvr_view_uniform {
+    mat4 model;
+    mat4 view;
+    mat4 proj;
+} dvr_view_uniform;
 
 static DVR_RESULT(u32) find_memory_type(u32 type_filter, VkMemoryPropertyFlags properties) {
     VkPhysicalDeviceMemoryProperties mem_props;
@@ -282,9 +314,10 @@ static void dvr_vk_copy_buffer(VkBuffer src, VkBuffer dst, VkDeviceSize size) {
 typedef struct dvr_buffer_desc {
     dvr_range data;
     VkBufferUsageFlags usage;
+    dvr_buffer_lifecycle lifecycle;
 } dvr_buffer_desc;
 
-DVR_RESULT(dvr_buffer) dvr_create_buffer(dvr_buffer_desc* desc) {
+static DVR_RESULT(dvr_buffer) _dvr_create_static_buffer(dvr_buffer_desc* desc) {
     VkBuffer src_buffer;
     VkDeviceMemory src_memory;
 
@@ -299,9 +332,11 @@ DVR_RESULT(dvr_buffer) dvr_create_buffer(dvr_buffer_desc* desc) {
     DVR_BUBBLE_INTO(dvr_buffer, result);
 
     void* mapped;
-    vkMapMemory(g_dvr_state.vk.device, src_memory, 0, desc->data.size, 0, &mapped);
-    memcpy(mapped, desc->data.base, desc->data.size);
-    vkUnmapMemory(g_dvr_state.vk.device, src_memory);
+    if (desc->data.base != NULL) {
+        vkMapMemory(g_dvr_state.vk.device, src_memory, 0, desc->data.size, 0, &mapped);
+        memcpy(mapped, desc->data.base, desc->data.size);
+        vkUnmapMemory(g_dvr_state.vk.device, src_memory);
+    }
 
     VkBuffer dst_buffer;
     VkDeviceMemory dst_memory;
@@ -321,6 +356,8 @@ DVR_RESULT(dvr_buffer) dvr_create_buffer(dvr_buffer_desc* desc) {
     dvr_buffer buf = {
         .vk.buffer = dst_buffer,
         .vk.memory = dst_memory,
+        .vk.memmap = NULL,
+        .lifecycle = desc->lifecycle,
     };
 
     vkDestroyBuffer(g_dvr_state.vk.device, src_buffer, NULL);
@@ -329,9 +366,59 @@ DVR_RESULT(dvr_buffer) dvr_create_buffer(dvr_buffer_desc* desc) {
     return DVR_OK(dvr_buffer, buf);
 }
 
+static DVR_RESULT(dvr_buffer) _dvr_create_dynamic_buffer(dvr_buffer_desc* desc) {
+    VkBuffer buffer;
+    VkDeviceMemory memory;
+
+    DVR_RESULT(i32)
+    result = dvr_vk_create_buffer(
+        desc->data.size,
+        desc->usage,
+        VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
+        &buffer,
+        &memory
+    );
+    DVR_BUBBLE_INTO(dvr_buffer, result);
+
+    void* mapped;
+    vkMapMemory(g_dvr_state.vk.device, memory, 0, desc->data.size, 0, &mapped);
+
+    dvr_buffer buf = {
+        .vk.buffer = buffer,
+        .vk.memory = memory,
+        .vk.memmap = mapped,
+        .lifecycle = desc->lifecycle,
+    };
+
+    return DVR_OK(dvr_buffer, buf);
+}
+
+DVR_RESULT(dvr_buffer) dvr_create_buffer(dvr_buffer_desc* desc) {
+    switch (desc->lifecycle) {
+        case DVR_BUFFER_LIFECYCLE_STATIC:
+            return _dvr_create_static_buffer(desc);
+        case DVR_BUFFER_LIFECYCLE_DYNAMIC:
+            return _dvr_create_dynamic_buffer(desc);
+        default:
+            return DVR_ERROR(dvr_buffer, "unknown buffer lifecycle");
+    }
+}
+
 void dvr_destroy_buffer(dvr_buffer buffer) {
     vkDestroyBuffer(g_dvr_state.vk.device, buffer.vk.buffer, NULL);
+    if (buffer.lifecycle == DVR_BUFFER_LIFECYCLE_DYNAMIC) {
+        vkUnmapMemory(g_dvr_state.vk.device, buffer.vk.memory);
+    }
     vkFreeMemory(g_dvr_state.vk.device, buffer.vk.memory, NULL);
+}
+
+void dvr_write_buffer(dvr_buffer buffer, dvr_range new_data) {
+    if (buffer.lifecycle != DVR_BUFFER_LIFECYCLE_DYNAMIC) {
+        DVRLOG_ERROR("cannot write to buffers not marked as dynamic");
+        return;
+    }
+
+    memcpy(buffer.vk.memmap, new_data.base, new_data.size);
 }
 
 void dvr_term_handler(int signum) {
@@ -1042,6 +1129,33 @@ static DVR_RESULT(i32) dvr_vk_create_render_pass(void) {
     return DVR_OK(i32, 0);
 }
 
+static DVR_RESULT(i32) dvr_vk_create_descriptor_set_layout() {
+    VkDescriptorSetLayoutBinding ubo_layout_binding = {
+        .binding = 0,
+        .descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER,
+        .descriptorCount = 1,
+        .stageFlags = VK_SHADER_STAGE_VERTEX_BIT,
+        .pImmutableSamplers = NULL,
+    };
+
+    VkDescriptorSetLayoutCreateInfo layout_info = {
+        .sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO,
+        .bindingCount = 1,
+        .pBindings = &ubo_layout_binding,
+    };
+
+    if (vkCreateDescriptorSetLayout(
+            g_dvr_state.vk.device,
+            &layout_info,
+            NULL,
+            &g_dvr_state.vk.descriptor_set_layout
+        ) != VK_SUCCESS) {
+        return DVR_ERROR(i32, "failed to create descriptor set layout");
+    }
+
+    return DVR_OK(i32, 0);
+}
+
 static DVR_RESULT(dvr_range) dvr_read_file(const char* path) {
     FILE* file = fopen(path, "rb");
     if (file == NULL) {
@@ -1222,8 +1336,8 @@ static DVR_RESULT(i32) dvr_vk_create_graphics_pipeline(void) {
 
     VkPipelineLayoutCreateInfo pipeline_layout_info = {
         .sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO,
-        .setLayoutCount = 0,
-        .pSetLayouts = NULL,
+        .setLayoutCount = 1,
+        .pSetLayouts = &g_dvr_state.vk.descriptor_set_layout,
         .pushConstantRangeCount = 0,
         .pPushConstantRanges = NULL,
     };
@@ -1331,10 +1445,115 @@ static DVR_RESULT(i32) dvr_vk_create_vertex_buffer(void) {
     vbuf = dvr_create_buffer(&(dvr_buffer_desc){
         .data = DVR_RANGE(k_vertices),
         .usage = VK_BUFFER_USAGE_VERTEX_BUFFER_BIT,
+        .lifecycle = DVR_BUFFER_LIFECYCLE_STATIC,
     });
     DVR_BUBBLE_INTO(i32, vbuf);
 
     g_dvr_state.vk.vertex_buffer = DVR_UNWRAP(vbuf);
+
+    return DVR_OK(i32, 0);
+}
+
+static DVR_RESULT(i32) dvr_vk_create_index_buffer(void) {
+    DVR_RESULT(dvr_buffer)
+    ibuf = dvr_create_buffer(&(dvr_buffer_desc){
+        .data = DVR_RANGE(k_indices),
+        .usage = VK_BUFFER_USAGE_INDEX_BUFFER_BIT,
+        .lifecycle = DVR_BUFFER_LIFECYCLE_STATIC,
+    });
+    DVR_BUBBLE_INTO(i32, ibuf);
+
+    g_dvr_state.vk.index_buffer = DVR_UNWRAP(ibuf);
+
+    return DVR_OK(i32, 0);
+}
+
+static DVR_RESULT(i32) dvr_vk_create_uniform_buffers(void) {
+    for (usize i = 0; i < DVR_MAX_FRAMES_IN_FLIGHT; i++) {
+        DVR_RESULT(dvr_buffer)
+        ibuf = dvr_create_buffer(&(dvr_buffer_desc){
+            .data =
+                (dvr_range){
+                    .base = NULL,
+                    .size = sizeof(dvr_view_uniform),
+                },
+            .usage = VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT,
+            .lifecycle = DVR_BUFFER_LIFECYCLE_DYNAMIC,
+        });
+        DVR_BUBBLE_INTO(i32, ibuf);
+
+        g_dvr_state.vk.uniform_buffers[i] = DVR_UNWRAP(ibuf);
+    }
+    return DVR_OK(i32, 0);
+}
+
+static DVR_RESULT(i32) dvr_vk_create_descriptor_pool(void) {
+    VkDescriptorPoolSize pool_size = {
+        .type = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER,
+        .descriptorCount = DVR_MAX_FRAMES_IN_FLIGHT,
+    };
+
+    VkDescriptorPoolCreateInfo pool_info = {
+        .sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO,
+        .poolSizeCount = 1,
+        .pPoolSizes = &pool_size,
+        .maxSets = DVR_MAX_FRAMES_IN_FLIGHT,
+    };
+
+    if (vkCreateDescriptorPool(
+            g_dvr_state.vk.device,
+            &pool_info,
+            NULL,
+            &g_dvr_state.vk.descriptor_pool
+        ) != VK_SUCCESS) {
+        return DVR_ERROR(i32, "failed to create descriptor pool");
+    }
+
+    return DVR_OK(i32, 0);
+}
+
+static DVR_RESULT(i32) dvr_vk_create_descriptor_sets(void) {
+    VkDescriptorSetLayout layouts[DVR_MAX_FRAMES_IN_FLIGHT];
+    for (usize i = 0; i < DVR_MAX_FRAMES_IN_FLIGHT; i++) {
+        layouts[i] = g_dvr_state.vk.descriptor_set_layout;
+    }
+
+    VkDescriptorSetAllocateInfo alloc_info = {
+        .sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO,
+        .descriptorPool = g_dvr_state.vk.descriptor_pool,
+        .descriptorSetCount = DVR_MAX_FRAMES_IN_FLIGHT,
+        .pSetLayouts = layouts,
+    };
+
+    if (vkAllocateDescriptorSets(
+            g_dvr_state.vk.device,
+            &alloc_info,
+            g_dvr_state.vk.descriptor_sets
+        ) != VK_SUCCESS) {
+        return DVR_ERROR(i32, "failed to allocate descriptor sets");
+    }
+
+    for (usize i = 0; i < DVR_MAX_FRAMES_IN_FLIGHT; i++) {
+        VkDescriptorBufferInfo buffer_info = {
+            .buffer = g_dvr_state.vk.uniform_buffers[i].vk.buffer,
+            .offset = 0,
+            .range = sizeof(dvr_view_uniform),
+        };
+
+        VkWriteDescriptorSet descriptor_write = {
+            .sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
+            .dstSet = g_dvr_state.vk.descriptor_sets[i],
+            .dstBinding = 0,
+            .dstArrayElement = 0,
+            .descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER,
+            .descriptorCount = 1,
+            .pBufferInfo = &buffer_info,
+            .pImageInfo = NULL,
+            .pTexelBufferView = NULL,
+        };
+
+        vkUpdateDescriptorSets(g_dvr_state.vk.device, 1, &descriptor_write, 0, NULL);
+    }
 
     return DVR_OK(i32, 0);
 }
@@ -1418,6 +1637,9 @@ static DVR_RESULT(i32) dvr_init_vulkan(void) {
     result = dvr_vk_create_render_pass();
     DVR_BUBBLE(result);
 
+    result = dvr_vk_create_descriptor_set_layout();
+    DVR_BUBBLE(result);
+
     result = dvr_vk_create_graphics_pipeline();
     DVR_BUBBLE(result);
 
@@ -1428,6 +1650,18 @@ static DVR_RESULT(i32) dvr_init_vulkan(void) {
     DVR_BUBBLE(result);
 
     result = dvr_vk_create_vertex_buffer();
+    DVR_BUBBLE(result);
+
+    result = dvr_vk_create_index_buffer();
+    DVR_BUBBLE(result);
+
+    result = dvr_vk_create_uniform_buffers();
+    DVR_BUBBLE(result);
+
+    result = dvr_vk_create_descriptor_pool();
+    DVR_BUBBLE(result);
+
+    result = dvr_vk_create_descriptor_sets();
     DVR_BUBBLE(result);
 
     result = dvr_vk_create_command_buffer();
@@ -1570,8 +1804,31 @@ static DVR_RESULT(i32)
     VkBuffer vertex_buffers[] = { g_dvr_state.vk.vertex_buffer.vk.buffer };
     VkDeviceSize offsets[] = { 0 };
     vkCmdBindVertexBuffers(command_buffer, 0, 1, vertex_buffers, offsets);
+    vkCmdBindIndexBuffer(
+        command_buffer,
+        g_dvr_state.vk.index_buffer.vk.buffer,
+        0,
+        VK_INDEX_TYPE_UINT16
+    );
 
-    vkCmdDraw(command_buffer, (u32)(sizeof(k_vertices) / sizeof(k_vertices[0])), 1, 0, 0);
+    vkCmdBindDescriptorSets(
+        command_buffer,
+        VK_PIPELINE_BIND_POINT_GRAPHICS,
+        g_dvr_state.vk.pipeline_layout,
+        0,
+        1,
+        &g_dvr_state.vk.descriptor_sets[g_dvr_state.vk.current_frame],
+        0,
+        NULL
+    );
+    vkCmdDrawIndexed(
+        command_buffer,
+        (u32)(sizeof(k_indices) / sizeof(k_indices[0])),
+        1,
+        0,
+        0,
+        0
+    );
 
     vkCmdEndRenderPass(command_buffer);
 
@@ -1623,6 +1880,21 @@ static DVR_RESULT(i32) dvr_draw_frame(void) {
         image_index
     );
     DVR_BUBBLE(res);
+
+    i32 width, height;
+    glfwGetFramebufferSize(g_dvr_state.window.window, &width, &height);
+    dvr_view_uniform uniform = {};
+    glm_perspective(90.0f, (f32)width / (f32)height, 0.0001f, 1000.0f, uniform.proj);
+    // uniform.proj[1][1] = -1;
+    glm_mat4_identity(uniform.view);
+    glm_translate_z(uniform.view, -1.0f);
+    glm_mat4_identity(uniform.model);
+    glm_rotate_y(uniform.model, g_dvr_state.time.total, uniform.model);
+
+    dvr_write_buffer(
+        g_dvr_state.vk.uniform_buffers[g_dvr_state.vk.current_frame],
+        DVR_RANGE(uniform)
+    );
 
     VkSubmitInfo submit_info = {
         .sType = VK_STRUCTURE_TYPE_SUBMIT_INFO,
@@ -1732,6 +2004,18 @@ void dvr_cleanup_vulkan(void) {
     dvr_vk_cleanup_swapchain();
 
     dvr_destroy_buffer(g_dvr_state.vk.vertex_buffer);
+    dvr_destroy_buffer(g_dvr_state.vk.index_buffer);
+
+    for (usize i = 0; i < DVR_MAX_FRAMES_IN_FLIGHT; i++) {
+        dvr_destroy_buffer(g_dvr_state.vk.uniform_buffers[i]);
+    }
+
+    vkDestroyDescriptorSetLayout(
+        g_dvr_state.vk.device,
+        g_dvr_state.vk.descriptor_set_layout,
+        NULL
+    );
+    vkDestroyDescriptorPool(g_dvr_state.vk.device, g_dvr_state.vk.descriptor_pool, NULL);
 
     for (usize i = 0; i < DVR_MAX_FRAMES_IN_FLIGHT; i++) {
         vkDestroySemaphore(g_dvr_state.vk.device, g_dvr_state.vk.image_available_sems[i], NULL);
