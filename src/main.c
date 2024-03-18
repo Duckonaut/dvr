@@ -2074,7 +2074,8 @@ static DVR_RESULT(dvr_none) dvr_vk_create_texture_sampler(void) {
 static DVR_RESULT(dvr_none) dvr_vk_create_mesh(void) {
     const struct aiScene* scene = aiImportFile(
         "viking_room.obj",
-        aiProcess_Triangulate | aiProcess_GenNormals | aiProcess_FlipUVs | aiProcess_FlipWindingOrder
+        aiProcess_Triangulate | aiProcess_GenNormals | aiProcess_FlipUVs |
+            aiProcess_FlipWindingOrder
     );
 
     if (!scene) {
@@ -2596,7 +2597,13 @@ static DVR_RESULT(dvr_none) dvr_draw_frame(void) {
     i32 width, height;
     glfwGetFramebufferSize(g_dvr_state.window.window, &width, &height);
     dvr_view_uniform uniform = {};
-    glm_perspective(50.0f * DEG_TO_RAD, (f32)width / (f32)height, 0.0001f, 1000.0f, uniform.proj);
+    glm_perspective(
+        50.0f * DEG_TO_RAD,
+        (f32)width / (f32)height,
+        0.0001f,
+        1000.0f,
+        uniform.proj
+    );
     // uniform.proj[1][1] = -1;
     glm_mat4_identity(uniform.view);
     glm_translate_z(uniform.view, -2.0f);
