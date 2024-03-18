@@ -1,0 +1,9 @@
+[wrap-file]
+directory = assimp-5.3.1
+source_url = https://github.com/assimp/assimp/archive/refs/tags/v5.3.1.tar.gz
+source_hash = a07666be71afe1ad4bc008c2336b7c688aca391271188eb9108d0c6db1be53f1
+source_filename = assimp-5.3.1.tar.gz
+
+[provide]
+assimp = assimp_dep
+

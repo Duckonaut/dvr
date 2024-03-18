@@ -175,6 +175,9 @@ src = [
 inc = include_directories('include')
 sys_inc = include_directories('libs', is_system : true)
 
+assimp_subproject = cmake.subproject('assimp', options : cmake_opt)
+assimp = assimp_subproject.dependency('assimp')
+
 vulkan_deps = [
   dependency('vulkan', required : true),
 ]
@@ -182,6 +185,7 @@ vulkan_deps = [
 deps = [
   subproject('cglm', default_options : ['default_library=static']).get_variable('cglm_dep'),
   dependency('glfw3', required : true, static : static_link_libs),
+  assimp,
   vulkan_deps,
   platform_deps,
   buildtype_deps,

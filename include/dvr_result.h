@@ -4,6 +4,10 @@
 #include "dvr_types.h"
 #include "dvr_utils.h"
 
+#ifndef DVR_ABORT
+#define DVR_ABORT exit(1)
+#endif
+
 typedef struct {
     const char* message;
     const char* file;
@@ -37,6 +41,12 @@ typedef struct {
         .is_ok = false,                                                                        \
     }
 
+/// Bubble the error through the call stack.
+///
+/// Only works if the ok type of the result is same as the ok type of the result
+/// of the enclosing function.
+///
+/// Safe to call with the parameter generating side effects (i.e. function call)
 #define DVR_BUBBLE(result)                                                                     \
     {                                                                                          \
         typeof(result) result_ = result;                                                       \
@@ -45,6 +55,11 @@ typedef struct {
         }                                                                                      \
     }
 
+/// Bubble the error through the call stack.
+///
+/// Pass in the ok type of the enclosing function to convert the error correctly.
+///
+/// Safe to call with the parameter generating side effects (i.e. function call)
 #define DVR_BUBBLE_INTO(scope_type, result)                                                    \
     {                                                                                          \
         typeof(result) result_ = result;                                                       \
@@ -53,6 +68,9 @@ typedef struct {
         }                                                                                      \
     }
 
+/// Try to do an operation on a result. The ok value of the result is passed as `value`.
+///
+/// Safe to call with the parameter generating side effects (i.e. function call)
 #define DVR_TRY_DO(result, if_ok)                                                              \
     {                                                                                          \
         typeof(result) result_ = result;                                                       \
@@ -64,6 +82,10 @@ typedef struct {
         }                                                                                      \
     }
 
+/// Extract the ok value of the result. The result needs to be checked for errors beforehand,
+/// otherwise the error will be printed and program terminated with DVR_ABORT
+///
+/// NOT Safe to call with the parameter generating side effects (i.e. function call).
 #define DVR_UNWRAP(result)                                                                     \
     (result.is_ok ? result.ok                                                                  \
                   : (DVRLOG_ERROR(                                                             \
@@ -73,13 +95,17 @@ typedef struct {
                          result.error.line,                                                    \
                          result.error.message                                                  \
                      ),                                                                        \
-                     exit(1),                                                                  \
+                     DVR_ABORT,                                                                \
                      result.ok))
 
+/// Extract the ok value of the result. If the result was an error, print error, and return the
+/// or value.
+///
+/// NOT Safe to call with the parameter generating side effects (i.e. function call).
 #define DVR_UNWRAP_OR(result, or)                                                              \
     (result.is_ok ? result.ok                                                                  \
                   : (DVRLOG_ERROR(                                                             \
-                         "%s %s:%d: %s",                                                       \
+                         "(silenced) %s %s:%d: %s",                                            \
                          result.error.file,                                                    \
                          result.error.function,                                                \
                          result.error.line,                                                    \
@@ -88,6 +114,9 @@ typedef struct {
                      or                                                                        \
                     ))
 
+/// Print error if result is one.
+///
+/// NOT Safe to call with the parameter generating side effects (i.e. function call).
 #define DVR_SHOW_ERROR(result)                                                                 \
     if (!result.is_ok) {                                                                       \
         DVRLOG_ERROR(                                                                          \
@@ -99,6 +128,9 @@ typedef struct {
         );                                                                                     \
     }
 
+/// Print error and exit if result is one.
+///
+/// NOT Safe to call with the parameter generating side effects (i.e. function call).
 #define DVR_EXIT_ON_ERROR(result)                                                              \
     if (!result.is_ok) {                                                                       \
         DVRLOG_ERROR(                                                                          \
@@ -108,11 +140,26 @@ typedef struct {
             result.error.line,                                                                 \
             result.error.message                                                               \
         );                                                                                     \
-        exit(1);                                                                               \
+        DVR_ABORT;                                                                             \
     }
 
+/// Check if result is ok.
+///
+/// Safe to call with the parameter generating side effects (i.e. function call)
 #define DVR_RESULT_IS_OK(result) (result.is_ok)
+/// Check if result is an error.
+///
+/// Safe to call with the parameter generating side effects (i.e. function call)
 #define DVR_RESULT_IS_ERROR(result) (!result.is_ok)
+
+typedef struct dvr_none {
+    u8 _nothing;
+} dvr_none;
+
+#define DVR_NONE                                                                               \
+    (dvr_none) {}
+
+DVR_RESULT_DEF(dvr_none);
 
 DVR_RESULT_DEF(i32);
 DVR_RESULT_DEF(u32);
