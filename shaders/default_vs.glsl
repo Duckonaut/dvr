@@ -3,8 +3,10 @@
 
 layout(location = 0) in vec3 iPosition;
 layout(location = 1) in vec3 iColor;
+layout(location = 2) in vec2 iUv;
 
 layout(location = 0) out vec3 aColor;
+layout(location = 1) out vec2 aUv;
 
 layout(binding = 0) uniform transform {
     mat4 u_model;
@@ -16,4 +18,5 @@ void main()
 {
     gl_Position = u_proj * u_view * u_model * vec4(iPosition, 1.0);
     aColor = iColor;
+    aUv = iUv;
 }

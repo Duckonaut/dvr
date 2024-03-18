@@ -99,6 +99,7 @@ typedef struct dvr_image {
     struct {
         VkImage image;
         VkDeviceMemory memory;
+        VkImageView view;
     } vk;
 } dvr_image;
 DVR_RESULT_DEF(dvr_image);
@@ -153,6 +154,8 @@ typedef struct dvr_state {
         dvr_buffer uniform_buffers[DVR_MAX_FRAMES_IN_FLIGHT];
         VkDescriptorSet descriptor_sets[DVR_MAX_FRAMES_IN_FLIGHT];
         dvr_image texture_image;
+        dvr_image depth_image;
+        VkSampler sampler;
     } vk;
     struct {
         f32 total;
@@ -172,6 +175,7 @@ static dvr_state g_dvr_state;
 typedef struct dvr_vertex {
     vec3 pos;
     vec3 color;
+    vec2 uv;
 } dvr_vertex;
 
 static const VkVertexInputBindingDescription dvr_vertex_binding_description = {
@@ -193,15 +197,28 @@ static const VkVertexInputAttributeDescription dvr_vertex_attribute_descriptions
         .format = VK_FORMAT_R32G32B32_SFLOAT,
         .offset = offsetof(dvr_vertex, color),
     },
+    {
+        .location = 2,
+        .binding = 0,
+        .format = VK_FORMAT_R32G32_SFLOAT,
+        .offset = offsetof(dvr_vertex, uv),
+    },
 };
 
 static const dvr_vertex k_vertices[] = {
-    { .pos = { 0.0f, -0.5f, 0.0f }, .color = { 1.0f, 0.0f, 0.0f } },
-    { .pos = { 0.5f, 0.5f, 0.0f }, .color = { 0.0f, 1.0f, 0.0f } },
-    { .pos = { -0.5f, 0.5f, 0.0f }, .color = { 0.0f, 0.0f, 1.0f } },
-    { .pos = { 0.0f, 0.8f, 0.0f }, .color = { 0.0f, 1.0f, 1.0f } },
-    { .pos = { 0.0f, 0.5f, 0.25f }, .color = { 1.0f, 0.0f, 1.0f } },
-    { .pos = { 0.0f, 0.5f, -0.25f }, .color = { 1.0f, 1.0f, 0.0f } },
+    { .pos = { 0.0f, -0.5f, 0.0f }, .color = { 1.0f, 0.0f, 0.0f }, .uv = { 0.5f, 0.0f } },
+    { .pos = { 0.5f, 0.5f, 0.0f }, .color = { 0.0f, 1.0f, 0.0f }, .uv = { 1.0f, 0.5f } },
+    { .pos = { -0.5f, 0.5f, 0.0f }, .color = { 0.0f, 0.0f, 1.0f }, .uv = { 0.0f, 0.5f } },
+    { .pos = { 0.0f, 0.8f, 0.0f }, .color = { 0.0f, 1.0f, 1.0f }, .uv = { 0.5f, 1.0f } },
+    { .pos = { 0.0f, 0.5f, 0.1f }, .color = { 1.0f, 0.0f, 1.0f }, .uv = { 0.5f, 0.5f } },
+    { .pos = { 0.0f, 0.5f, -0.1f }, .color = { 1.0f, 1.0f, 0.0f }, .uv = { 0.5f, 0.5f } },
+
+    { .pos = { 0.0f, -0.5f, 0.5f }, .color = { 1.0f, 0.0f, 0.0f }, .uv = { 0.5f, 0.0f } },
+    { .pos = { 0.5f, 0.5f, 0.5f }, .color = { 0.0f, 1.0f, 0.0f }, .uv = { 1.0f, 0.5f } },
+    { .pos = { -0.5f, 0.5f, 0.5f }, .color = { 0.0f, 0.0f, 1.0f }, .uv = { 0.0f, 0.5f } },
+    { .pos = { 0.0f, 0.8f, 0.5f }, .color = { 0.0f, 1.0f, 1.0f }, .uv = { 0.5f, 1.0f } },
+    { .pos = { 0.0f, 0.5f, 0.6f }, .color = { 1.0f, 0.0f, 1.0f }, .uv = { 0.5f, 0.5f } },
+    { .pos = { 0.0f, 0.5f, 0.4f }, .color = { 1.0f, 1.0f, 0.0f }, .uv = { 0.5f, 0.5f } },
 };
 
 // clang-format off
@@ -214,6 +231,15 @@ static const u16 k_indices[] = {
     5, 3, 1,
     5, 2, 3,
     5, 0, 2,
+
+    4 + 6, 0 + 6, 1 + 6,
+    4 + 6, 1 + 6, 3 + 6,
+    4 + 6, 3 + 6, 2 + 6,
+    4 + 6, 2 + 6, 0 + 6,
+    5 + 6, 1 + 6, 0 + 6,
+    5 + 6, 3 + 6, 1 + 6,
+    5 + 6, 2 + 6, 3 + 6,
+    5 + 6, 0 + 6, 2 + 6,
 };
 // clang-format on
 
@@ -455,7 +481,21 @@ static void dvr_vk_transition_image_layout(
     VkImageLayout old_layout,
     VkImageLayout new_layout
 ) {
-    (void)format; // TODO
+    VkImageAspectFlags aspect = 0;
+
+    switch (format) {
+        case VK_FORMAT_D16_UNORM:
+        case VK_FORMAT_D32_SFLOAT:
+        case VK_FORMAT_D16_UNORM_S8_UINT:
+        case VK_FORMAT_D24_UNORM_S8_UINT:
+        case VK_FORMAT_D32_SFLOAT_S8_UINT:
+            aspect = VK_IMAGE_ASPECT_DEPTH_BIT;
+            break;
+        default:
+            aspect = VK_IMAGE_ASPECT_COLOR_BIT;
+            break;
+    }
+
     VkCommandBuffer command_buffer = dvr_vk_begin_transient_commands();
 
     VkImageMemoryBarrier barrier = {
@@ -466,7 +506,7 @@ static void dvr_vk_transition_image_layout(
         .dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
         .image = image,
         .subresourceRange = {
-            .aspectMask = VK_IMAGE_ASPECT_COLOR_BIT,
+            .aspectMask = aspect,
             .baseMipLevel = 0,
             .levelCount = 1,
             .baseArrayLayer = 0,
@@ -490,6 +530,13 @@ static void dvr_vk_transition_image_layout(
 
         src_stage = VK_PIPELINE_STAGE_TRANSFER_BIT;
         dst_stage = VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT;
+    } else if (old_layout == VK_IMAGE_LAYOUT_UNDEFINED && new_layout == VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL) {
+        barrier.srcAccessMask = 0;
+        barrier.dstAccessMask = VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_READ_BIT |
+                                VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT;
+
+        src_stage = VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT;
+        dst_stage = VK_PIPELINE_STAGE_EARLY_FRAGMENT_TESTS_BIT;
     } else {
         DVRLOG_ERROR("unsupported layout transition, expect validation layers to complain");
     }
@@ -543,6 +590,45 @@ static void dvr_vk_copy_buffer_to_image(VkBuffer buffer, VkImage image, u32 widt
     dvr_vk_end_transient_commands(command_buffer);
 }
 
+DVR_RESULT_DEF(VkImageView);
+
+static DVR_RESULT(VkImageView) dvr_vk_create_image_view(VkImage image, VkFormat format) {
+    VkImageAspectFlags aspect = 0;
+    switch (format) {
+        case VK_FORMAT_D16_UNORM:
+        case VK_FORMAT_D32_SFLOAT:
+        case VK_FORMAT_D16_UNORM_S8_UINT:
+        case VK_FORMAT_D24_UNORM_S8_UINT:
+        case VK_FORMAT_D32_SFLOAT_S8_UINT:
+            aspect = VK_IMAGE_ASPECT_DEPTH_BIT;
+            break;
+        default:
+            aspect = VK_IMAGE_ASPECT_COLOR_BIT;
+            break;
+    }
+
+    VkImageView view;
+
+    VkImageViewCreateInfo view_info = {
+        .sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO,
+        .image = image,
+        .viewType = VK_IMAGE_VIEW_TYPE_2D,
+        .format = format,
+        .subresourceRange = {
+            .aspectMask = aspect,
+            .baseMipLevel = 0,
+            .levelCount = 1,
+            .baseArrayLayer = 0,
+            .layerCount = 1,
+        },
+    };
+
+    if (vkCreateImageView(DVR_DEVICE, &view_info, NULL, &view) != VK_SUCCESS) {
+        return DVR_ERROR(VkImageView, "failed to create image view");
+    }
+    return DVR_OK(VkImageView, view);
+}
+
 DVR_RESULT(dvr_image) dvr_vk_create_image(dvr_image_desc* desc) {
     VkImageCreateInfo image_info = {
         .sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO,
@@ -587,9 +673,13 @@ DVR_RESULT(dvr_image) dvr_vk_create_image(dvr_image_desc* desc) {
 
     vkBindImageMemory(DVR_DEVICE, image, memory, 0);
 
+    DVR_RESULT(VkImageView) view_res = dvr_vk_create_image_view(image, desc->format);
+    DVR_BUBBLE_INTO(dvr_image, view_res);
+
     dvr_image img = {
         .vk.image = image,
         .vk.memory = memory,
+        .vk.view = DVR_UNWRAP(view_res),
     };
 
     return DVR_OK(dvr_image, img);
@@ -600,6 +690,7 @@ DVR_RESULT(dvr_image) dvr_create_image(dvr_image_desc* desc) {
 }
 
 void dvr_vk_destroy_image(dvr_image image) {
+    vkDestroyImageView(DVR_DEVICE, image.vk.view, NULL);
     vkDestroyImage(DVR_DEVICE, image.vk.image, NULL);
     vkFreeMemory(DVR_DEVICE, image.vk.memory, NULL);
 }
@@ -1017,6 +1108,11 @@ static usize rate_device(VkPhysicalDevice dev) {
         return 0;
     }
 
+    if (!device_features.samplerAnisotropy) {
+        DVRLOG_WARNING("%s does not support anisotropy", device_properties.deviceName);
+        return 0;
+    }
+
     queue_family_indices indices = find_queue_families(dev);
     if (!indices.graphics_family_found) {
         DVRLOG_WARNING(
@@ -1100,7 +1196,9 @@ static DVR_RESULT(i32) dvr_vk_create_logical_device(void) {
         arrput(queue_create_infos, qci);
     }
 
-    VkPhysicalDeviceFeatures device_features = {};
+    VkPhysicalDeviceFeatures device_features = {
+        .samplerAnisotropy = VK_TRUE,
+    };
 
     VkDeviceCreateInfo device_create_info = {
         .sType = VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO,
@@ -1214,32 +1312,14 @@ static DVR_RESULT(i32) dvr_vk_create_swapchain_image_views(void) {
     arrsetlen(g_dvr_state.vk.swapchain_image_views, arrlen(g_dvr_state.vk.swapchain_images));
 
     for (usize i = 0; i < arrlenu(g_dvr_state.vk.swapchain_images); i++) {
-        VkImageViewCreateInfo create_info = {
-            .sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO,
-            .image = g_dvr_state.vk.swapchain_images[i],
-            .viewType = VK_IMAGE_VIEW_TYPE_2D,
-            .format = g_dvr_state.vk.swapchain_format,
-            .components.r = VK_COMPONENT_SWIZZLE_IDENTITY,
-            .components.g = VK_COMPONENT_SWIZZLE_IDENTITY,
-            .components.b = VK_COMPONENT_SWIZZLE_IDENTITY,
-            .components.a = VK_COMPONENT_SWIZZLE_IDENTITY,
-            .subresourceRange = {
-                .aspectMask = VK_IMAGE_ASPECT_COLOR_BIT,
-                .baseMipLevel = 0,
-                .levelCount = 1,
-                .baseArrayLayer = 0,
-                .layerCount = 1,
-            },
-        };
+        DVR_RESULT(VkImageView)
+        image_view_res = dvr_vk_create_image_view(
+            g_dvr_state.vk.swapchain_images[i],
+            g_dvr_state.vk.swapchain_format
+        );
+        DVR_BUBBLE_INTO(i32, image_view_res);
 
-        if (vkCreateImageView(
-                DVR_DEVICE,
-                &create_info,
-                NULL,
-                &g_dvr_state.vk.swapchain_image_views[i]
-            ) != VK_SUCCESS) {
-            return DVR_ERROR(i32, "failed to create swapchain image views");
-        }
+        g_dvr_state.vk.swapchain_image_views[i] = DVR_UNWRAP(image_view_res);
     }
 
     return DVR_OK(i32, 0);
@@ -1262,25 +1342,45 @@ static DVR_RESULT(i32) dvr_vk_create_render_pass(void) {
         .layout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
     };
 
+    VkAttachmentDescription depth_attachment = {
+        .format = VK_FORMAT_D32_SFLOAT,
+        .samples = VK_SAMPLE_COUNT_1_BIT,
+        .loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR,
+        .storeOp = VK_ATTACHMENT_STORE_OP_DONT_CARE,
+        .stencilLoadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE,
+        .stencilStoreOp = VK_ATTACHMENT_STORE_OP_DONT_CARE,
+        .initialLayout = VK_IMAGE_LAYOUT_UNDEFINED,
+        .finalLayout = VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL,
+    };
+
+    VkAttachmentReference depth_attachment_ref = {
+        .attachment = 1,
+        .layout = VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL,
+    };
+
     VkSubpassDescription subpass = {
         .pipelineBindPoint = VK_PIPELINE_BIND_POINT_GRAPHICS,
         .colorAttachmentCount = 1,
         .pColorAttachments = &color_attachment_ref,
+        .pDepthStencilAttachment = &depth_attachment_ref,
     };
 
     VkSubpassDependency dependency = {
         .srcSubpass = VK_SUBPASS_EXTERNAL,
         .dstSubpass = 0,
-        .srcStageMask = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT,
-        .srcAccessMask = 0,
-        .dstStageMask = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT,
-        .dstAccessMask = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT,
+        .srcStageMask = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT |
+                        VK_PIPELINE_STAGE_LATE_FRAGMENT_TESTS_BIT,
+        .srcAccessMask = VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT,
+        .dstStageMask = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT |
+                        VK_PIPELINE_STAGE_EARLY_FRAGMENT_TESTS_BIT,
+        .dstAccessMask =
+            VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT | VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT,
     };
 
     VkRenderPassCreateInfo render_pass_info = {
         .sType = VK_STRUCTURE_TYPE_RENDER_PASS_CREATE_INFO,
-        .attachmentCount = 1,
-        .pAttachments = &color_attachment,
+        .attachmentCount = 2,
+        .pAttachments = (VkAttachmentDescription[]){ color_attachment, depth_attachment },
         .subpassCount = 1,
         .pSubpasses = &subpass,
         .dependencyCount = 1,
@@ -1304,10 +1404,23 @@ static DVR_RESULT(i32) dvr_vk_create_descriptor_set_layout() {
         .pImmutableSamplers = NULL,
     };
 
+    VkDescriptorSetLayoutBinding sampler_layout_binding = {
+        .binding = 1,
+        .descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
+        .descriptorCount = 1,
+        .stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT,
+        .pImmutableSamplers = NULL,
+    };
+
+    VkDescriptorSetLayoutBinding bindings[] = {
+        ubo_layout_binding,
+        sampler_layout_binding,
+    };
+
     VkDescriptorSetLayoutCreateInfo layout_info = {
         .sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO,
-        .bindingCount = 1,
-        .pBindings = &ubo_layout_binding,
+        .bindingCount = 2,
+        .pBindings = bindings,
     };
 
     if (vkCreateDescriptorSetLayout(
@@ -1423,7 +1536,8 @@ static DVR_RESULT(i32) dvr_vk_create_graphics_pipeline(void) {
         .sType = VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO,
         .vertexBindingDescriptionCount = 1,
         .pVertexBindingDescriptions = &dvr_vertex_binding_description,
-        .vertexAttributeDescriptionCount = 2,
+        .vertexAttributeDescriptionCount = sizeof(dvr_vertex_attribute_descriptions) /
+                                           sizeof(dvr_vertex_attribute_descriptions[0]),
         .pVertexAttributeDescriptions = dvr_vertex_attribute_descriptions,
     };
 
@@ -1467,6 +1581,17 @@ static DVR_RESULT(i32) dvr_vk_create_graphics_pipeline(void) {
         .depthBiasConstantFactor = 0.0f,
         .depthBiasClamp = 0.0f,
         .depthBiasSlopeFactor = 0.0f,
+    };
+
+    VkPipelineDepthStencilStateCreateInfo depth_stencil = {
+        .sType = VK_STRUCTURE_TYPE_PIPELINE_DEPTH_STENCIL_STATE_CREATE_INFO,
+        .depthTestEnable = VK_TRUE,
+        .depthWriteEnable = VK_TRUE,
+        .depthCompareOp = VK_COMPARE_OP_LESS_OR_EQUAL,
+        .depthBoundsTestEnable = VK_FALSE,
+        .minDepthBounds = 0.0f,
+        .maxDepthBounds = 1.0f,
+        .stencilTestEnable = VK_FALSE,
     };
 
     VkPipelineMultisampleStateCreateInfo multisampling = {
@@ -1525,7 +1650,7 @@ static DVR_RESULT(i32) dvr_vk_create_graphics_pipeline(void) {
         .pInputAssemblyState = &input_assembly,
         .pViewportState = &viewport_state,
         .pRasterizationState = &rasterizer,
-        .pDepthStencilState = NULL,
+        .pDepthStencilState = &depth_stencil,
         .pColorBlendState = &color_blending,
         .pDynamicState = &dynamic_state,
         .pMultisampleState = &multisampling,
@@ -1560,12 +1685,13 @@ static DVR_RESULT(i32) dvr_vk_create_framebuffers(void) {
     );
 
     for (usize i = 0; i < arrlenu(g_dvr_state.vk.swapchain_image_views); i++) {
-        VkImageView attachments[] = { g_dvr_state.vk.swapchain_image_views[i] };
+        VkImageView attachments[] = { g_dvr_state.vk.swapchain_image_views[i],
+                                      g_dvr_state.vk.depth_image.vk.view };
 
         VkFramebufferCreateInfo framebuffer_info = {
             .sType = VK_STRUCTURE_TYPE_FRAMEBUFFER_CREATE_INFO,
             .renderPass = g_dvr_state.vk.render_pass,
-            .attachmentCount = 1,
+            .attachmentCount = 2,
             .pAttachments = attachments,
             .width = g_dvr_state.vk.swapchain_extent.width,
             .height = g_dvr_state.vk.swapchain_extent.height,
@@ -1598,6 +1724,35 @@ static DVR_RESULT(i32) dvr_vk_create_command_pool(void) {
         VK_SUCCESS) {
         return DVR_OK(i32, 0);
     }
+
+    return DVR_OK(i32, 0);
+}
+
+static DVR_RESULT(i32) dvr_vk_create_depth_image(void) {
+    i32 depth_width, depth_height;
+    glfwGetFramebufferSize(g_dvr_state.window.window, &depth_width, &depth_height);
+
+    DVR_RESULT(dvr_image)
+    image_res = dvr_create_image(&(dvr_image_desc){
+        .width = (u32)depth_width,
+        .height = (u32)depth_height,
+        .format = VK_FORMAT_D32_SFLOAT,
+        .tiling = VK_IMAGE_TILING_OPTIMAL,
+        .usage = VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT,
+        .properties = VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT,
+    });
+    DVR_BUBBLE_INTO(i32, image_res);
+
+    dvr_image image = DVR_UNWRAP(image_res);
+
+    dvr_vk_transition_image_layout(
+        image.vk.image,
+        VK_FORMAT_D32_SFLOAT,
+        VK_IMAGE_LAYOUT_UNDEFINED,
+        VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL
+    );
+
+    g_dvr_state.vk.depth_image = image;
 
     return DVR_OK(i32, 0);
 }
@@ -1675,6 +1830,35 @@ static DVR_RESULT(i32) dvr_vk_create_texture_image(void) {
     return DVR_OK(i32, 0);
 }
 
+static DVR_RESULT(i32) dvr_vk_create_texture_sampler(void) {
+    VkPhysicalDeviceProperties properties;
+    vkGetPhysicalDeviceProperties(g_dvr_state.vk.physical_device, &properties);
+
+    VkSamplerCreateInfo sampler_info = {
+        .sType = VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO,
+        .magFilter = VK_FILTER_NEAREST,
+        .minFilter = VK_FILTER_NEAREST,
+        .addressModeU = VK_SAMPLER_ADDRESS_MODE_REPEAT,
+        .addressModeV = VK_SAMPLER_ADDRESS_MODE_REPEAT,
+        .addressModeW = VK_SAMPLER_ADDRESS_MODE_REPEAT,
+        .anisotropyEnable = VK_TRUE,
+        .maxAnisotropy = properties.limits.maxSamplerAnisotropy,
+        .borderColor = VK_BORDER_COLOR_FLOAT_OPAQUE_BLACK,
+        .unnormalizedCoordinates = VK_FALSE,
+        .mipmapMode = VK_SAMPLER_MIPMAP_MODE_LINEAR,
+        .mipLodBias = 0.0f,
+        .minLod = 0.0f,
+        .maxLod = 0.0f,
+    };
+
+    if (vkCreateSampler(DVR_DEVICE, &sampler_info, NULL, &g_dvr_state.vk.sampler) !=
+        VK_SUCCESS) {
+        return DVR_ERROR(i32, "failed to create texture sampler");
+    }
+
+    return DVR_OK(i32, 0);
+}
+
 static DVR_RESULT(i32) dvr_vk_create_vertex_buffer(void) {
     DVR_RESULT(dvr_buffer)
     vbuf = dvr_create_buffer(&(dvr_buffer_desc){
@@ -1723,15 +1907,22 @@ static DVR_RESULT(i32) dvr_vk_create_uniform_buffers(void) {
 }
 
 static DVR_RESULT(i32) dvr_vk_create_descriptor_pool(void) {
-    VkDescriptorPoolSize pool_size = {
+    VkDescriptorPoolSize ubo_size = {
         .type = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER,
         .descriptorCount = DVR_MAX_FRAMES_IN_FLIGHT,
     };
 
+    VkDescriptorPoolSize image_sampler_size = {
+        .type = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
+        .descriptorCount = DVR_MAX_FRAMES_IN_FLIGHT,
+    };
+
+    VkDescriptorPoolSize pool_sizes[] = { ubo_size, image_sampler_size };
+
     VkDescriptorPoolCreateInfo pool_info = {
         .sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO,
-        .poolSizeCount = 1,
-        .pPoolSizes = &pool_size,
+        .poolSizeCount = 2,
+        .pPoolSizes = pool_sizes,
         .maxSets = DVR_MAX_FRAMES_IN_FLIGHT,
     };
 
@@ -1768,19 +1959,38 @@ static DVR_RESULT(i32) dvr_vk_create_descriptor_sets(void) {
             .range = sizeof(dvr_view_uniform),
         };
 
-        VkWriteDescriptorSet descriptor_write = {
-            .sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
-            .dstSet = g_dvr_state.vk.descriptor_sets[i],
-            .dstBinding = 0,
-            .dstArrayElement = 0,
-            .descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER,
-            .descriptorCount = 1,
-            .pBufferInfo = &buffer_info,
-            .pImageInfo = NULL,
-            .pTexelBufferView = NULL,
+        VkDescriptorImageInfo image_info = {
+            .imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+            .imageView = g_dvr_state.vk.texture_image.vk.view,
+            .sampler = g_dvr_state.vk.sampler,
         };
 
-        vkUpdateDescriptorSets(DVR_DEVICE, 1, &descriptor_write, 0, NULL);
+        VkWriteDescriptorSet descriptor_writes[2] = {
+            {
+                .sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
+                .dstSet = g_dvr_state.vk.descriptor_sets[i],
+                .dstBinding = 0,
+                .dstArrayElement = 0,
+                .descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER,
+                .descriptorCount = 1,
+                .pBufferInfo = &buffer_info,
+                .pImageInfo = NULL,
+                .pTexelBufferView = NULL,
+            },
+            {
+                .sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
+                .dstSet = g_dvr_state.vk.descriptor_sets[i],
+                .dstBinding = 1,
+                .dstArrayElement = 0,
+                .descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
+                .descriptorCount = 1,
+                .pBufferInfo = NULL,
+                .pImageInfo = &image_info,
+                .pTexelBufferView = NULL,
+            },
+        };
+
+        vkUpdateDescriptorSets(DVR_DEVICE, 2, descriptor_writes, 0, NULL);
     }
 
     return DVR_OK(i32, 0);
@@ -1868,13 +2078,19 @@ static DVR_RESULT(i32) dvr_init_vulkan(void) {
     result = dvr_vk_create_graphics_pipeline();
     DVR_BUBBLE(result);
 
-    result = dvr_vk_create_framebuffers();
-    DVR_BUBBLE(result);
-
     result = dvr_vk_create_command_pool();
     DVR_BUBBLE(result);
 
+    result = dvr_vk_create_depth_image();
+    DVR_BUBBLE(result);
+
+    result = dvr_vk_create_framebuffers();
+    DVR_BUBBLE(result);
+
     result = dvr_vk_create_texture_image();
+    DVR_BUBBLE(result);
+
+    result = dvr_vk_create_texture_sampler();
     DVR_BUBBLE(result);
 
     result = dvr_vk_create_vertex_buffer();
@@ -1969,6 +2185,9 @@ static DVR_RESULT(i32) dvr_vk_recreate_swapchain(void) {
         DVR_BUBBLE(result);
     }
 
+    result = dvr_vk_create_depth_image();
+    DVR_BUBBLE(result);
+
     result = dvr_vk_create_framebuffers();
     DVR_BUBBLE(result);
 
@@ -1995,10 +2214,15 @@ static DVR_RESULT(i32)
             .offset = { 0, 0 },
             .extent = g_dvr_state.vk.swapchain_extent,
         },
-        .clearValueCount = 1,
-        .pClearValues = &(VkClearValue) {
-            .color = {
-                .float32 = { 0.0f, 0.0f, 0.0f, 1.0f },
+        .clearValueCount = 2,
+        .pClearValues = (VkClearValue[]) {
+            {
+                .color = {
+                    .float32 = { 0.0f, 0.0f, 0.0f, 1.0f },
+                },
+            },
+            {
+                .depthStencil = { 1.0f, 0 },
             },
         },
     };
@@ -2117,6 +2341,7 @@ static DVR_RESULT(i32) dvr_draw_frame(void) {
     glm_mat4_identity(uniform.view);
     glm_translate_z(uniform.view, -1.0f);
     glm_mat4_identity(uniform.model);
+    glm_translate_y(uniform.view, -0.5f);
     glm_rotate_y(uniform.model, g_dvr_state.time.total, uniform.model);
 
     dvr_write_buffer(
@@ -2131,11 +2356,15 @@ static DVR_RESULT(i32) dvr_draw_frame(void) {
         .commandBufferCount = 1,
         .pCommandBuffers = &g_dvr_state.vk.command_buffers[g_dvr_state.vk.current_frame],
         .waitSemaphoreCount = 1,
-        .pWaitSemaphores = (VkSemaphore[]
-        ){ g_dvr_state.vk.image_available_sems[g_dvr_state.vk.current_frame] },
+        .pWaitSemaphores =
+            (VkSemaphore[]){
+                g_dvr_state.vk.image_available_sems[g_dvr_state.vk.current_frame],
+            },
         .signalSemaphoreCount = 1,
-        .pSignalSemaphores = (VkSemaphore[]
-        ){ g_dvr_state.vk.render_finished_sems[g_dvr_state.vk.current_frame] },
+        .pSignalSemaphores =
+            (VkSemaphore[]){
+                g_dvr_state.vk.render_finished_sems[g_dvr_state.vk.current_frame],
+            },
     };
 
     if (vkQueueSubmit(
@@ -2150,10 +2379,15 @@ static DVR_RESULT(i32) dvr_draw_frame(void) {
     VkPresentInfoKHR present_info = {
         .sType = VK_STRUCTURE_TYPE_PRESENT_INFO_KHR,
         .waitSemaphoreCount = 1,
-        .pWaitSemaphores = (VkSemaphore[]
-        ){ g_dvr_state.vk.render_finished_sems[g_dvr_state.vk.current_frame] },
+        .pWaitSemaphores =
+            (VkSemaphore[]){
+                g_dvr_state.vk.render_finished_sems[g_dvr_state.vk.current_frame],
+            },
         .swapchainCount = 1,
-        .pSwapchains = (VkSwapchainKHR[]){ g_dvr_state.vk.swapchain },
+        .pSwapchains =
+            (VkSwapchainKHR[]){
+                g_dvr_state.vk.swapchain,
+            },
         .pImageIndices = &image_index,
         .pResults = NULL
     };
@@ -2217,6 +2451,7 @@ static void dvr_vk_cleanup_swapchain(void) {
     for (usize i = 0; i < arrlenu(g_dvr_state.vk.swapchain_image_views); i++) {
         vkDestroyImageView(DVR_DEVICE, g_dvr_state.vk.swapchain_image_views[i], NULL);
     }
+    dvr_destroy_image(g_dvr_state.vk.depth_image);
     vkDestroySwapchainKHR(DVR_DEVICE, g_dvr_state.vk.swapchain, NULL);
 }
 
@@ -2226,6 +2461,7 @@ void dvr_cleanup_vulkan(void) {
     dvr_destroy_buffer(g_dvr_state.vk.vertex_buffer);
     dvr_destroy_buffer(g_dvr_state.vk.index_buffer);
     dvr_destroy_image(g_dvr_state.vk.texture_image);
+    vkDestroySampler(DVR_DEVICE, g_dvr_state.vk.sampler, NULL);
 
     for (usize i = 0; i < DVR_MAX_FRAMES_IN_FLIGHT; i++) {
         dvr_destroy_buffer(g_dvr_state.vk.uniform_buffers[i]);
