@@ -5,6 +5,7 @@
 #include "dvr_utils.h"
 
 #ifndef DVR_ABORT
+#include <stdlib.h>
 #define DVR_ABORT exit(1)
 #endif
 
