@@ -46,3 +46,9 @@ typedef struct dvr_range {
     (dvr_range) {                                                                              \
         .base = NULL, .size = 0                                                                \
     }
+
+typedef struct dvr_result_dvr_range dvr_result_dvr_range_t;
+
+dvr_result_dvr_range_t dvr_read_file(const char* path);
+dvr_result_dvr_range_t dvr_read_file_range(const char* path, usize offset, usize size);
+void dvr_free_file(dvr_range range);
