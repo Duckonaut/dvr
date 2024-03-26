@@ -14,7 +14,6 @@
 #else
 #define DVR_ENABLE_VALIDATION_LAYERS true
 #endif
-#define DVR_MAX_FRAMES_IN_FLIGHT 2
 
 typedef struct dvr_buffer_data {
     dvr_buffer_lifecycle lifecycle;
@@ -66,6 +65,7 @@ typedef struct dvr_framebuffer_data {
     struct {
         VkFramebuffer framebuffer;
     } vk;
+    VkRect2D render_area;
 } dvr_framebuffer_data;
 
 typedef struct dvr_descriptor_set_layout_data {
@@ -80,12 +80,6 @@ typedef struct dvr_descriptor_set_data {
     } vk;
 } dvr_descriptor_set_data;
 
-typedef struct dvr_command_buffer_data {
-    struct {
-        VkCommandBuffer buffers[DVR_MAX_FRAMES_IN_FLIGHT];
-    } vk;
-} dvr_command_buffer_data;
-
 #define DVR_MAX_BUFFERS 1024
 #define DVR_MAX_IMAGES 1024
 #define DVR_MAX_SAMPLERS 256
@@ -95,7 +89,6 @@ typedef struct dvr_command_buffer_data {
 #define DVR_MAX_FRAMEBUFFERS 64
 #define DVR_MAX_DESCRIPTOR_SET_LAYOUTS 64
 #define DVR_MAX_DESCRIPTOR_SETS 1024
-#define DVR_MAX_COMMAND_BUFFERS 1024
 
 #define DVR_POOL_MAX_UBOS 1024
 #define DVR_POOL_MAX_SAMPLERS 1024
@@ -112,16 +105,16 @@ typedef struct dvr_state {
         VkSwapchainKHR swapchain;
         VkImage* swapchain_images;
         VkImageView* swapchain_image_views;
-        VkFramebuffer* swapchain_framebuffers;
         VkFormat swapchain_format;
         VkExtent2D swapchain_extent;
         VkDescriptorPool descriptor_pool;
         VkCommandPool command_pool;
+        VkCommandBuffer command_buffer;
         VkSampleCountFlagBits msaa_samples;
-        VkSemaphore image_available_sems[DVR_MAX_FRAMES_IN_FLIGHT];
-        VkSemaphore render_finished_sems[DVR_MAX_FRAMES_IN_FLIGHT];
-        VkFence in_flight_fences[DVR_MAX_FRAMES_IN_FLIGHT];
-        u32 current_frame;
+        VkSemaphore image_available_sem;
+        VkSemaphore render_finished_sem;
+        VkFence in_flight_fence;
+        u32 image_index;
     } vk;
     struct {
         dvr_buffer_data buffers[DVR_MAX_BUFFERS];
@@ -142,9 +135,12 @@ typedef struct dvr_state {
         u64 descriptor_set_layout_usage_map[DVR_MAX_DESCRIPTOR_SET_LAYOUTS / 64];
         dvr_descriptor_set_data descriptor_sets[DVR_MAX_DESCRIPTOR_SETS];
         u64 descriptor_set_usage_map[DVR_MAX_DESCRIPTOR_SETS / 64];
-        dvr_command_buffer_data command_buffers[DVR_MAX_COMMAND_BUFFERS];
-        u64 command_buffer_usage_map[DVR_MAX_COMMAND_BUFFERS / 64];
     } res;
+    struct {
+        dvr_render_pass swapchain_render_pass;
+        dvr_image* swapchain_images;
+        dvr_framebuffer* swapchain_framebuffers;
+    } defaults;
     struct {
         GLFWwindow* window;
         bool just_resized;
@@ -315,9 +311,24 @@ static DVR_RESULT(dvr_buffer) dvr_vk_create_static_buffer(dvr_buffer_desc* desc)
     VkBuffer dst_buffer;
     VkDeviceMemory dst_memory;
 
+    VkBufferUsageFlags usage = 0;
+    switch (desc->usage) {
+        case DVR_BUFFER_USAGE_VERTEX:
+            usage = VK_BUFFER_USAGE_VERTEX_BUFFER_BIT;
+            break;
+        case DVR_BUFFER_USAGE_INDEX:
+            usage = VK_BUFFER_USAGE_INDEX_BUFFER_BIT;
+            break;
+        case DVR_BUFFER_USAGE_UNIFORM:
+            usage = VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT;
+            break;
+        default:
+            return DVR_ERROR(dvr_buffer, "unknown buffer usage");
+    }
+
     result = dvr_vk_create_buffer(
         desc->data.size,
-        VK_BUFFER_USAGE_TRANSFER_DST_BIT | desc->usage,
+        VK_BUFFER_USAGE_TRANSFER_DST_BIT | usage,
         VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT,
         &dst_buffer,
         &dst_memory
@@ -348,10 +359,25 @@ static DVR_RESULT(dvr_buffer) dvr_vk_create_dynamic_buffer(dvr_buffer_desc* desc
     VkBuffer buffer;
     VkDeviceMemory memory;
 
+    VkBufferUsageFlags usage = 0;
+    switch (desc->usage) {
+        case DVR_BUFFER_USAGE_VERTEX:
+            usage = VK_BUFFER_USAGE_VERTEX_BUFFER_BIT;
+            break;
+        case DVR_BUFFER_USAGE_INDEX:
+            usage = VK_BUFFER_USAGE_INDEX_BUFFER_BIT;
+            break;
+        case DVR_BUFFER_USAGE_UNIFORM:
+            usage = VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT;
+            break;
+        default:
+            return DVR_ERROR(dvr_buffer, "unknown buffer usage");
+    }
+
     DVR_RESULT(dvr_none)
     result = dvr_vk_create_buffer(
         desc->data.size,
-        desc->usage,
+        usage,
         VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
         &buffer,
         &memory
@@ -401,14 +427,46 @@ void dvr_destroy_buffer(dvr_buffer buffer) {
     dvr_set_slot_free(g_dvr_state.res.buffer_usage_map, buffer.id);
 }
 
-void dvr_write_buffer(dvr_buffer buffer, dvr_range new_data) {
+void dvr_write_buffer(dvr_buffer buffer, dvr_range new_data, u32 offset) {
     dvr_buffer_data* buf = dvr_get_buffer_data(buffer);
     if (buf->lifecycle != DVR_BUFFER_LIFECYCLE_DYNAMIC) {
         DVRLOG_ERROR("cannot write to buffers not marked as dynamic");
         return;
     }
 
-    memcpy(buf->vk.memmap, new_data.base, new_data.size);
+    memcpy(((u8*)buf->vk.memmap + offset), new_data.base, new_data.size);
+}
+
+void dvr_bind_vertex_buffer(dvr_buffer buffer, u32 binding) {
+    dvr_buffer_data* buf = dvr_get_buffer_data(buffer);
+    VkDeviceSize offset = 0;
+    vkCmdBindVertexBuffers(g_dvr_state.vk.command_buffer, binding, 1, &buf->vk.buffer, &offset);
+}
+
+void dvr_bind_index_buffer(dvr_buffer buffer, VkIndexType index_type) {
+    dvr_buffer_data* buf = dvr_get_buffer_data(buffer);
+    vkCmdBindIndexBuffer(g_dvr_state.vk.command_buffer, buf->vk.buffer, 0, index_type);
+}
+
+void dvr_bind_uniform_buffer(dvr_buffer buffer, u32 binding) {
+    dvr_buffer_data* buf = dvr_get_buffer_data(buffer);
+    VkDescriptorBufferInfo buffer_info = {
+        .buffer = buf->vk.buffer,
+        .offset = 0,
+        .range = VK_WHOLE_SIZE,
+    };
+
+    VkWriteDescriptorSet descriptor_write = {
+        .sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
+        .dstSet = g_dvr_state.res.descriptor_sets[binding].vk.set,
+        .dstBinding = binding,
+        .dstArrayElement = 0,
+        .descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER,
+        .descriptorCount = 1,
+        .pBufferInfo = &buffer_info,
+    };
+
+    vkUpdateDescriptorSets(DVR_DEVICE, 1, &descriptor_write, 0, NULL);
 }
 
 // DVR_IMAGE FUNCTIONS
@@ -759,7 +817,11 @@ DVR_RESULT(dvr_image) dvr_vk_create_image(dvr_image_desc* desc) {
         .format = desc->format,
         .tiling = desc->tiling,
         .initialLayout = VK_IMAGE_LAYOUT_UNDEFINED,
-        .usage = desc->usage | (has_data ? VK_IMAGE_USAGE_TRANSFER_DST_BIT : 0),
+        .usage = desc->usage | (has_data ? VK_IMAGE_USAGE_TRANSFER_DST_BIT : 0) |
+                 (desc->render_target ? VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT : 0) |
+                 (desc->generate_mipmaps
+                      ? VK_IMAGE_USAGE_TRANSFER_SRC_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT
+                      : 0),
         .sharingMode = VK_SHARING_MODE_EXCLUSIVE,
         .samples = desc->num_samples,
         .flags = 0,
@@ -1042,7 +1104,7 @@ DVR_RESULT(dvr_render_pass) dvr_create_render_pass(dvr_render_pass_desc* desc) {
         .pipelineBindPoint = VK_PIPELINE_BIND_POINT_GRAPHICS,
         .colorAttachmentCount = desc->num_color_attachments,
         .pColorAttachments = color_attachment_refs,
-        .pResolveAttachments = resolve_attachment_refs,
+        .pResolveAttachments = desc->num_resolve_attachments ? resolve_attachment_refs : NULL,
         .pDepthStencilAttachment =
             desc->depth_stencil_attachment.enable ? &depth_attachment_ref : NULL,
     };
@@ -1157,6 +1219,47 @@ void dvr_destroy_descriptor_set_layout(dvr_descriptor_set_layout layout) {
     dvr_set_slot_free(g_dvr_state.res.descriptor_set_layout_usage_map, layout.id);
 }
 
+static dvr_framebuffer_data* dvr_get_framebuffer_data(dvr_framebuffer framebuffer);
+
+void dvr_begin_render_pass(
+    dvr_render_pass pass,
+    dvr_framebuffer framebuffer,
+    VkClearValue* clear_values,
+    u32 num_clear_values
+) {
+    dvr_render_pass_data* pass_data = dvr_get_render_pass_data(pass);
+    dvr_framebuffer_data* framebuffer_data = dvr_get_framebuffer_data(framebuffer);
+
+    VkRenderPassBeginInfo begin_info = {
+        .sType = VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO,
+        .renderPass = pass_data->vk.render_pass,
+        .framebuffer = framebuffer_data->vk.framebuffer,
+        .renderArea = framebuffer_data->render_area,
+        .clearValueCount = num_clear_values,
+        .pClearValues = clear_values,
+    };
+
+    vkCmdBeginRenderPass(DVR_COMMAND_BUFFER, &begin_info, VK_SUBPASS_CONTENTS_INLINE);
+    vkCmdSetViewport(
+        DVR_COMMAND_BUFFER,
+        0,
+        1,
+        &(VkViewport){
+            .x = 0.0f,
+            .y = 0.0f,
+            .width = (f32)framebuffer_data->render_area.extent.width,
+            .height = (f32)framebuffer_data->render_area.extent.height,
+            .minDepth = 0.0f,
+            .maxDepth = 1.0f,
+        }
+    );
+    vkCmdSetScissor(DVR_COMMAND_BUFFER, 0, 1, &framebuffer_data->render_area);
+}
+
+void dvr_end_render_pass() {
+    vkCmdEndRenderPass(DVR_COMMAND_BUFFER);
+}
+
 // DVR_DESCRIPTOR_SET FUNCTIONS
 
 static dvr_descriptor_set_data* dvr_get_descriptor_set_data(dvr_descriptor_set set) {
@@ -1246,6 +1349,35 @@ DVR_RESULT(dvr_descriptor_set) dvr_create_descriptor_set(dvr_descriptor_set_desc
     dvr_set_slot_used(g_dvr_state.res.descriptor_set_usage_map, free_slot);
 
     return DVR_OK(dvr_descriptor_set, (dvr_descriptor_set){ .id = free_slot });
+}
+
+static void dvr_vk_destroy_descriptor_set(dvr_descriptor_set set) {
+    dvr_descriptor_set_data* data = dvr_get_descriptor_set_data(set);
+    vkFreeDescriptorSets(DVR_DEVICE, g_dvr_state.vk.descriptor_pool, 1, &data->vk.set);
+}
+
+void dvr_destroy_descriptor_set(dvr_descriptor_set set) {
+    dvr_vk_destroy_descriptor_set(set);
+
+    dvr_set_slot_free(g_dvr_state.res.descriptor_set_usage_map, set.id);
+}
+
+static dvr_pipeline_data* dvr_get_pipeline_data(dvr_pipeline pipeline);
+
+void dvr_bind_descriptor_set(dvr_pipeline pipeline, dvr_descriptor_set set) {
+    dvr_pipeline_data* pipeline_data = dvr_get_pipeline_data(pipeline);
+    dvr_descriptor_set_data* set_data = dvr_get_descriptor_set_data(set);
+
+    vkCmdBindDescriptorSets(
+        DVR_COMMAND_BUFFER,
+        VK_PIPELINE_BIND_POINT_GRAPHICS,
+        pipeline_data->vk.layout,
+        0,
+        1,
+        &set_data->vk.set,
+        0,
+        NULL
+    );
 }
 
 // DVR_SHADER_MODULE FUNCTIONS
@@ -1415,10 +1547,17 @@ DVR_RESULT(dvr_pipeline) dvr_create_pipeline(dvr_pipeline_desc* desc) {
         .blendConstants = { 0.0f, 0.0f, 0.0f, 0.0f },
     };
 
+    VkDescriptorSetLayout layouts[desc->layout.num_desc_set_layouts];
+
+    for (u32 i = 0; i < desc->layout.num_desc_set_layouts; i++) {
+        layouts[i] =
+            dvr_get_descriptor_set_layout_data(desc->layout.desc_set_layouts[i])->vk.layout;
+    }
+
     VkPipelineLayoutCreateInfo pipeline_layout_info = {
         .sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO,
         .setLayoutCount = desc->layout.num_desc_set_layouts,
-        .pSetLayouts = desc->layout.desc_set_layouts,
+        .pSetLayouts = layouts,
         .pushConstantRangeCount = desc->layout.num_push_constant_ranges,
         .pPushConstantRanges = desc->layout.push_constant_ranges,
     };
@@ -1485,6 +1624,11 @@ void dvr_destroy_pipeline(dvr_pipeline pipeline) {
     dvr_set_slot_free(g_dvr_state.res.pipeline_usage_map, pipeline.id);
 }
 
+void dvr_bind_pipeline(dvr_pipeline pipeline) {
+    dvr_pipeline_data* data = dvr_get_pipeline_data(pipeline);
+    vkCmdBindPipeline(DVR_COMMAND_BUFFER, VK_PIPELINE_BIND_POINT_GRAPHICS, data->vk.pipeline);
+}
+
 // DVR_FRAMEBUFFER FUNCTIONS
 
 static dvr_framebuffer_data* dvr_get_framebuffer_data(dvr_framebuffer framebuffer) {
@@ -1496,7 +1640,8 @@ static dvr_framebuffer_data* dvr_get_framebuffer_data(dvr_framebuffer framebuffe
     return &g_dvr_state.res.framebuffers[framebuffer.id];
 }
 
-DVR_RESULT(dvr_framebuffer) dvr_create_framebuffer(dvr_framebuffer_desc* desc) {
+DVR_RESULT_DEF(dvr_framebuffer_data);
+static DVR_RESULT(dvr_framebuffer_data) dvr_vk_create_framebuffer(dvr_framebuffer_desc* desc) {
     VkImageView attachments[desc->num_attachments];
     for (u32 i = 0; i < desc->num_attachments; i++) {
         attachments[i] = dvr_get_image_data(desc->attachments[i])->vk.view;
@@ -1514,16 +1659,27 @@ DVR_RESULT(dvr_framebuffer) dvr_create_framebuffer(dvr_framebuffer_desc* desc) {
 
     VkFramebuffer framebuffer;
     if (vkCreateFramebuffer(DVR_DEVICE, &framebuffer_info, NULL, &framebuffer) != VK_SUCCESS) {
-        return DVR_ERROR(dvr_framebuffer, "failed to create framebuffer");
+        return DVR_ERROR(dvr_framebuffer_data, "failed to create framebuffer");
     }
-
     dvr_framebuffer_data fb = {
         .vk.framebuffer = framebuffer,
+        .render_area =
+            (VkRect2D){
+                .offset = { 0, 0 },
+                .extent = { desc->width, desc->height },
+            },
     };
+
+    return DVR_OK(dvr_framebuffer_data, fb);
+}
+
+DVR_RESULT(dvr_framebuffer) dvr_create_framebuffer(dvr_framebuffer_desc* desc) {
+    DVR_RESULT(dvr_framebuffer_data) fb_res = dvr_vk_create_framebuffer(desc);
+    DVR_BUBBLE_INTO(dvr_framebuffer, fb_res);
 
     u16 free_slot =
         dvr_find_free_slot(g_dvr_state.res.framebuffer_usage_map, DVR_MAX_FRAMEBUFFERS);
-    g_dvr_state.res.framebuffers[free_slot] = fb;
+    g_dvr_state.res.framebuffers[free_slot] = DVR_UNWRAP(fb_res);
     dvr_set_slot_used(g_dvr_state.res.framebuffer_usage_map, free_slot);
 
     return DVR_OK(dvr_framebuffer, (dvr_framebuffer){ .id = free_slot });
@@ -1538,103 +1694,6 @@ void dvr_destroy_framebuffer(dvr_framebuffer framebuffer) {
     dvr_vk_destroy_framebuffer(framebuffer);
 
     dvr_set_slot_free(g_dvr_state.res.framebuffer_usage_map, framebuffer.id);
-}
-
-// DVR_COMMAND_BUFFER FUNCTIONS
-
-static dvr_command_buffer_data* dvr_get_command_buffer_data(dvr_command_buffer buffer) {
-    if (buffer.id >= DVR_MAX_COMMAND_BUFFERS) {
-        DVRLOG_ERROR("command buffer id out of range: %u", buffer.id);
-        return NULL;
-    }
-
-    return &g_dvr_state.res.command_buffers[buffer.id];
-}
-
-DVR_RESULT(dvr_command_buffer) dvr_create_command_buffer(dvr_command_buffer_desc* desc) {
-    VkCommandBufferAllocateInfo alloc_info = {
-        .sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO,
-        .commandPool = g_dvr_state.vk.command_pool,
-        .level = desc->level,
-        .commandBufferCount = DVR_MAX_FRAMES_IN_FLIGHT,
-    };
-
-    VkCommandBuffer command_buffers[DVR_MAX_FRAMES_IN_FLIGHT];
-    if (vkAllocateCommandBuffers(DVR_DEVICE, &alloc_info, command_buffers) != VK_SUCCESS) {
-        return DVR_ERROR(dvr_command_buffer, "failed to allocate command buffer");
-    }
-
-    dvr_command_buffer_data cb;
-    for (u32 i = 0; i < DVR_MAX_FRAMES_IN_FLIGHT; i++) {
-        cb.vk.buffers[i] = command_buffers[i];
-    }
-
-    u16 free_slot =
-        dvr_find_free_slot(g_dvr_state.res.command_buffer_usage_map, DVR_MAX_COMMAND_BUFFERS);
-    g_dvr_state.res.command_buffers[free_slot] = cb;
-    dvr_set_slot_used(g_dvr_state.res.command_buffer_usage_map, free_slot);
-
-    return DVR_OK(dvr_command_buffer, (dvr_command_buffer){ .id = free_slot });
-}
-
-static void dvr_vk_destroy_command_buffer(dvr_command_buffer buffer) {
-    dvr_command_buffer_data* data = dvr_get_command_buffer_data(buffer);
-    vkFreeCommandBuffers(
-        DVR_DEVICE,
-        g_dvr_state.vk.command_pool,
-        DVR_MAX_FRAMES_IN_FLIGHT,
-        data->vk.buffers
-    );
-}
-
-void dvr_destroy_command_buffer(dvr_command_buffer buffer) {
-    dvr_vk_destroy_command_buffer(buffer);
-
-    dvr_set_slot_free(g_dvr_state.res.command_buffer_usage_map, buffer.id);
-}
-
-void dvr_begin_command_buffer(dvr_command_buffer buffer) {
-    dvr_command_buffer_data* data = dvr_get_command_buffer_data(buffer);
-
-    VkCommandBufferBeginInfo begin_info = {
-        .sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO,
-        .flags = 0,
-        .pInheritanceInfo = 0,
-    };
-
-    vkBeginCommandBuffer(
-        data->vk.buffers[(g_dvr_state.vk.current_frame % DVR_MAX_FRAMES_IN_FLIGHT)],
-        &begin_info
-    );
-}
-
-void dvr_end_command_buffer(dvr_command_buffer buffer) {
-    dvr_command_buffer_data* data = dvr_get_command_buffer_data(buffer);
-
-    vkEndCommandBuffer(
-        data->vk.buffers[(g_dvr_state.vk.current_frame % DVR_MAX_FRAMES_IN_FLIGHT)]
-    );
-}
-
-void dvr_reset_command_buffer(dvr_command_buffer buffer) {
-    dvr_command_buffer_data* data = dvr_get_command_buffer_data(buffer);
-
-    vkResetCommandBuffer(
-        data->vk.buffers[(g_dvr_state.vk.current_frame % DVR_MAX_FRAMES_IN_FLIGHT)],
-        0
-    );
-}
-
-void dvr_submit_command_buffer(dvr_command_buffer buffer) {
-    dvr_command_buffer_data* data = dvr_get_command_buffer_data(buffer);
-
-    VkSubmitInfo submit_info = {
-        .sType = VK_STRUCTURE_TYPE_SUBMIT_INFO,
-        .commandBufferCount = 1,
-        .pCommandBuffers = &data->vk.buffers[(g_dvr_state.vk.current_frame % DVR_MAX_FRAMES_IN_FLIGHT)],
-    };
-
-    vkQueueSubmit(g_dvr_state.vk.graphics_queue, 1, &submit_info, VK_NULL_HANDLE);
 }
 
 // DVR GLOBAL STATE FUNCTIONS
@@ -1909,7 +1968,7 @@ static swapchain_support_details query_swapchain_support(VkPhysicalDevice dev) {
 
 static VkSurfaceFormatKHR choose_swapchain_format(const VkSurfaceFormatKHR* formats, usize n) {
     for (usize i = 0; i < n; i++) {
-        if (formats[i].format == VK_FORMAT_B8G8R8_SRGB &&
+        if (formats[i].format == VK_FORMAT_R8G8B8A8_SRGB &&
             formats[i].colorSpace == VK_COLOR_SPACE_SRGB_NONLINEAR_KHR) {
             return formats[i];
         }
@@ -2244,6 +2303,7 @@ static DVR_RESULT(dvr_none) dvr_vk_create_swapchain(void) {
 
 static DVR_RESULT(dvr_none) dvr_vk_create_swapchain_image_views(void) {
     arrsetlen(g_dvr_state.vk.swapchain_image_views, arrlen(g_dvr_state.vk.swapchain_images));
+    arrsetlen(g_dvr_state.defaults.swapchain_images, arrlen(g_dvr_state.vk.swapchain_images));
 
     for (usize i = 0; i < arrlenu(g_dvr_state.vk.swapchain_images); i++) {
         DVR_RESULT(VkImageView)
@@ -2255,6 +2315,68 @@ static DVR_RESULT(dvr_none) dvr_vk_create_swapchain_image_views(void) {
         DVR_BUBBLE_INTO(dvr_none, image_view_res);
 
         g_dvr_state.vk.swapchain_image_views[i] = DVR_UNWRAP(image_view_res);
+
+        dvr_image_data data = {
+            .vk.image = g_dvr_state.vk.swapchain_images[i],
+            .vk.view = g_dvr_state.vk.swapchain_image_views[i],
+            .width = g_dvr_state.vk.swapchain_extent.width,
+            .height = g_dvr_state.vk.swapchain_extent.height,
+        };
+
+        u16 free_slot = dvr_find_free_slot(g_dvr_state.res.image_usage_map, DVR_MAX_IMAGES);
+        g_dvr_state.res.images[free_slot] = data;
+        dvr_set_slot_used(g_dvr_state.res.image_usage_map, free_slot);
+
+        g_dvr_state.defaults.swapchain_images[i] = (dvr_image){ .id = free_slot };
+    }
+
+    return DVR_OK(dvr_none, DVR_NONE);
+}
+
+static DVR_RESULT(dvr_none) dvr_vk_create_swapchain_render_pass(void) {
+    DVR_RESULT(dvr_render_pass)
+    rp_res = dvr_create_render_pass(&(dvr_render_pass_desc){
+        .num_color_attachments = 1,
+        .color_attachments[0] =
+            (dvr_render_pass_attachment_desc){
+                .enable = true,
+                .format = g_dvr_state.vk.swapchain_format,
+                .samples = VK_SAMPLE_COUNT_1_BIT,
+                .load_op = VK_ATTACHMENT_LOAD_OP_CLEAR,
+                .store_op = VK_ATTACHMENT_STORE_OP_STORE,
+                .stencil_load_op = VK_ATTACHMENT_LOAD_OP_DONT_CARE,
+                .stencil_store_op = VK_ATTACHMENT_STORE_OP_DONT_CARE,
+                .initial_layout = VK_IMAGE_LAYOUT_UNDEFINED,
+                .final_layout = VK_IMAGE_LAYOUT_PRESENT_SRC_KHR,
+            },
+        .num_resolve_attachments = 0,
+    });
+
+    DVR_BUBBLE_INTO(dvr_none, rp_res);
+
+    g_dvr_state.defaults.swapchain_render_pass = DVR_UNWRAP(rp_res);
+
+    return DVR_OK(dvr_none, DVR_NONE);
+}
+
+static DVR_RESULT(dvr_none) dvr_vk_create_swapchain_framebuffers(void) {
+    arrsetlen(
+        g_dvr_state.defaults.swapchain_framebuffers,
+        arrlen(g_dvr_state.vk.swapchain_images)
+    );
+
+    for (usize i = 0; i < arrlenu(g_dvr_state.vk.swapchain_images); i++) {
+        DVR_RESULT(dvr_framebuffer)
+        fb_res = dvr_create_framebuffer(&(dvr_framebuffer_desc){
+            .render_pass = g_dvr_state.defaults.swapchain_render_pass,
+            .width = g_dvr_state.vk.swapchain_extent.width,
+            .height = g_dvr_state.vk.swapchain_extent.height,
+            .num_attachments = 1,
+            .attachments = &g_dvr_state.defaults.swapchain_images[i],
+        });
+        DVR_BUBBLE_INTO(dvr_none, fb_res);
+
+        g_dvr_state.defaults.swapchain_framebuffers[i] = DVR_UNWRAP(fb_res);
     }
 
     return DVR_OK(dvr_none, DVR_NONE);
@@ -2277,6 +2399,22 @@ static DVR_RESULT(dvr_none) dvr_vk_create_command_pool(void) {
     return DVR_OK(dvr_none, DVR_NONE);
 }
 
+static DVR_RESULT(dvr_none) dvr_vk_create_command_buffer(void) {
+    VkCommandBufferAllocateInfo alloc_info = {
+        .sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO,
+        .commandPool = g_dvr_state.vk.command_pool,
+        .level = VK_COMMAND_BUFFER_LEVEL_PRIMARY,
+        .commandBufferCount = 1,
+    };
+
+    if (vkAllocateCommandBuffers(DVR_DEVICE, &alloc_info, &g_dvr_state.vk.command_buffer) !=
+        VK_SUCCESS) {
+        return DVR_ERROR(dvr_none, "failed to allocate command buffer");
+    }
+
+    return DVR_OK(dvr_none, DVR_NONE);
+}
+
 static DVR_RESULT(dvr_none) dvr_vk_create_descriptor_pool(void) {
     VkDescriptorPoolSize ubo_size = {
         .type = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER,
@@ -2294,7 +2432,8 @@ static DVR_RESULT(dvr_none) dvr_vk_create_descriptor_pool(void) {
         .sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO,
         .poolSizeCount = 2,
         .pPoolSizes = pool_sizes,
-        .maxSets = DVR_MAX_FRAMES_IN_FLIGHT,
+        .maxSets = 1,
+        .flags = VK_DESCRIPTOR_POOL_CREATE_FREE_DESCRIPTOR_SET_BIT,
     };
 
     if (vkCreateDescriptorPool(DVR_DEVICE, &pool_info, NULL, &g_dvr_state.vk.descriptor_pool) !=
@@ -2315,27 +2454,21 @@ static DVR_RESULT(dvr_none) dvr_vk_create_sync_objects(void) {
         .flags = VK_FENCE_CREATE_SIGNALED_BIT,
     };
 
-    for (usize i = 0; i < DVR_MAX_FRAMES_IN_FLIGHT; i++) {
-        if (vkCreateSemaphore(
-                DVR_DEVICE,
-                &sem_info,
-                nullptr,
-                &g_dvr_state.vk.image_available_sems[i]
-            ) != VK_SUCCESS ||
-            vkCreateSemaphore(
-                DVR_DEVICE,
-                &sem_info,
-                nullptr,
-                &g_dvr_state.vk.render_finished_sems[i]
-            ) != VK_SUCCESS ||
-            vkCreateFence(
-                DVR_DEVICE,
-                &fence_info,
-                nullptr,
-                &g_dvr_state.vk.in_flight_fences[i]
-            ) != VK_SUCCESS) {
-            return DVR_ERROR(dvr_none, "failed to create sync objects");
-        }
+    if (vkCreateSemaphore(
+            DVR_DEVICE,
+            &sem_info,
+            nullptr,
+            &g_dvr_state.vk.image_available_sem
+        ) != VK_SUCCESS ||
+        vkCreateSemaphore(
+            DVR_DEVICE,
+            &sem_info,
+            nullptr,
+            &g_dvr_state.vk.render_finished_sem
+        ) != VK_SUCCESS ||
+        vkCreateFence(DVR_DEVICE, &fence_info, nullptr, &g_dvr_state.vk.in_flight_fence) !=
+            VK_SUCCESS) {
+        return DVR_ERROR(dvr_none, "failed to create sync objects");
     }
 
     return DVR_OK(dvr_none, DVR_NONE);
@@ -2364,7 +2497,16 @@ static DVR_RESULT(dvr_none) dvr_vk_setup(dvr_setup_desc* desc) {
     res = dvr_vk_create_swapchain_image_views();
     DVR_BUBBLE(res);
 
+    res = dvr_vk_create_swapchain_render_pass();
+    DVR_BUBBLE(res);
+
+    res = dvr_vk_create_swapchain_framebuffers();
+    DVR_BUBBLE(res);
+
     res = dvr_vk_create_command_pool();
+    DVR_BUBBLE(res);
+
+    res = dvr_vk_create_command_buffer();
     DVR_BUBBLE(res);
 
     res = dvr_vk_create_descriptor_pool();
@@ -2432,24 +2574,35 @@ DVR_RESULT(dvr_none) dvr_setup(dvr_setup_desc* desc) {
     return DVR_OK(dvr_none, DVR_NONE);
 }
 
-static void dvr_vk_cleanup_swapchain(void) {}
-
-static void dvr_vk_shutdown(void) {
-    for (usize i = 0; i < DVR_MAX_FRAMES_IN_FLIGHT; i++) {
-        vkDestroySemaphore(DVR_DEVICE, g_dvr_state.vk.render_finished_sems[i], NULL);
-        vkDestroySemaphore(DVR_DEVICE, g_dvr_state.vk.image_available_sems[i], NULL);
-        vkDestroyFence(DVR_DEVICE, g_dvr_state.vk.in_flight_fences[i], NULL);
+static void dvr_vk_cleanup_swapchain(void) {
+    for (usize i = 0; i < arrlenu(g_dvr_state.defaults.swapchain_framebuffers); i++) {
+        dvr_destroy_framebuffer(g_dvr_state.defaults.swapchain_framebuffers[i]);
     }
-
-    vkDestroyDescriptorPool(DVR_DEVICE, g_dvr_state.vk.descriptor_pool, NULL);
-
-    vkDestroyCommandPool(DVR_DEVICE, g_dvr_state.vk.command_pool, NULL);
-
     for (usize i = 0; i < arrlenu(g_dvr_state.vk.swapchain_image_views); i++) {
         vkDestroyImageView(DVR_DEVICE, g_dvr_state.vk.swapchain_image_views[i], NULL);
     }
-
+    dvr_destroy_render_pass(g_dvr_state.defaults.swapchain_render_pass);
     vkDestroySwapchainKHR(DVR_DEVICE, g_dvr_state.vk.swapchain, NULL);
+}
+
+static void dvr_vk_shutdown(void) {
+    vkDeviceWaitIdle(DVR_DEVICE);
+
+    dvr_vk_cleanup_swapchain();
+
+    vkDestroySemaphore(DVR_DEVICE, g_dvr_state.vk.render_finished_sem, NULL);
+    vkDestroySemaphore(DVR_DEVICE, g_dvr_state.vk.image_available_sem, NULL);
+    vkDestroyFence(DVR_DEVICE, g_dvr_state.vk.in_flight_fence, NULL);
+
+    vkDestroyDescriptorPool(DVR_DEVICE, g_dvr_state.vk.descriptor_pool, NULL);
+
+    vkFreeCommandBuffers(
+        DVR_DEVICE,
+        g_dvr_state.vk.command_pool,
+        1,
+        &g_dvr_state.vk.command_buffer
+    );
+    vkDestroyCommandPool(DVR_DEVICE, g_dvr_state.vk.command_pool, NULL);
 
     vkDestroyDevice(DVR_DEVICE, NULL);
 
@@ -2475,10 +2628,22 @@ static void dvr_glfw_shutdown(void) {
     glfwTerminate();
 }
 
-void dvr_cleanup(void) {
+void dvr_shutdown(void) {
     dvr_vk_shutdown();
     dvr_glfw_shutdown();
     dvr_log_close();
+}
+
+dvr_framebuffer dvr_swapchain_framebuffer(void) {
+    return g_dvr_state.defaults.swapchain_framebuffers[g_dvr_state.vk.image_index];
+}
+
+dvr_render_pass dvr_swapchain_render_pass(void) {
+    return g_dvr_state.defaults.swapchain_render_pass;
+}
+
+VkCommandBuffer dvr_command_buffer(void) {
+    return g_dvr_state.vk.command_buffer;
 }
 
 static DVR_RESULT(dvr_none) dvr_vk_recreate_swapchain(void) {
@@ -2492,11 +2657,7 @@ static DVR_RESULT(dvr_none) dvr_vk_recreate_swapchain(void) {
 
     vkDeviceWaitIdle(DVR_DEVICE);
 
-    for (usize i = 0; i < arrlenu(g_dvr_state.vk.swapchain_image_views); i++) {
-        vkDestroyImageView(DVR_DEVICE, g_dvr_state.vk.swapchain_image_views[i], NULL);
-    }
-
-    vkDestroySwapchainKHR(DVR_DEVICE, g_dvr_state.vk.swapchain, NULL);
+    dvr_vk_cleanup_swapchain();
 
     DVR_RESULT(dvr_none) res = dvr_vk_create_swapchain();
     DVR_BUBBLE(res);
@@ -2504,26 +2665,25 @@ static DVR_RESULT(dvr_none) dvr_vk_recreate_swapchain(void) {
     res = dvr_vk_create_swapchain_image_views();
     DVR_BUBBLE(res);
 
+    res = dvr_vk_create_swapchain_render_pass();
+    DVR_BUBBLE(res);
+
+    res = dvr_vk_create_swapchain_framebuffers();
+    DVR_BUBBLE(res);
+
     return DVR_OK(dvr_none, DVR_NONE);
 }
 
 DVR_RESULT(dvr_none) dvr_begin_frame(void) {
-    vkWaitForFences(
-        DVR_DEVICE,
-        1,
-        &g_dvr_state.vk.in_flight_fences[g_dvr_state.vk.current_frame],
-        VK_TRUE,
-        UINT64_MAX
-    );
+    vkWaitForFences(DVR_DEVICE, 1, &g_dvr_state.vk.in_flight_fence, VK_TRUE, UINT64_MAX);
 
-    u32 image_index;
     VkResult result = vkAcquireNextImageKHR(
         DVR_DEVICE,
         g_dvr_state.vk.swapchain,
         UINT64_MAX,
-        g_dvr_state.vk.image_available_sems[g_dvr_state.vk.current_frame],
+        g_dvr_state.vk.image_available_sem,
         VK_NULL_HANDLE,
-        &image_index
+        &g_dvr_state.vk.image_index
     );
 
     if (result == VK_ERROR_OUT_OF_DATE_KHR) {
@@ -2534,29 +2694,41 @@ DVR_RESULT(dvr_none) dvr_begin_frame(void) {
         return DVR_ERROR(dvr_none, "failed to acquire swapchain image");
     }
 
-    vkResetFences(
-        DVR_DEVICE,
-        1,
-        &g_dvr_state.vk.in_flight_fences[g_dvr_state.vk.current_frame]
-    );
+    vkResetFences(DVR_DEVICE, 1, &g_dvr_state.vk.in_flight_fence);
+
+    VkCommandBufferBeginInfo begin_info = {
+        .sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO,
+        .flags = 0,
+        .pInheritanceInfo = NULL,
+    };
+
+    if (vkBeginCommandBuffer(g_dvr_state.vk.command_buffer, &begin_info) != VK_SUCCESS) {
+        return DVR_ERROR(dvr_none, "failed to begin recording command buffer");
+    }
+
+    return DVR_OK(dvr_none, DVR_NONE);
 }
 
 DVR_RESULT(dvr_none) dvr_end_frame(void) {
+    if (vkEndCommandBuffer(g_dvr_state.vk.command_buffer) != VK_SUCCESS) {
+        return DVR_ERROR(dvr_none, "failed to record command buffer");
+    }
+
     VkSubmitInfo submit_info = {
         .sType = VK_STRUCTURE_TYPE_SUBMIT_INFO,
         .pWaitDstStageMask =
             (VkPipelineStageFlags[]){ VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT },
         .commandBufferCount = 1,
-        .pCommandBuffers = &g_dvr_state.vk.command_buffers[g_dvr_state.vk.current_frame],
+        .pCommandBuffers = &g_dvr_state.vk.command_buffer,
         .waitSemaphoreCount = 1,
         .pWaitSemaphores =
             (VkSemaphore[]){
-                g_dvr_state.vk.image_available_sems[g_dvr_state.vk.current_frame],
+                g_dvr_state.vk.image_available_sem,
             },
         .signalSemaphoreCount = 1,
         .pSignalSemaphores =
             (VkSemaphore[]){
-                g_dvr_state.vk.render_finished_sems[g_dvr_state.vk.current_frame],
+                g_dvr_state.vk.render_finished_sem,
             },
     };
 
@@ -2564,7 +2736,7 @@ DVR_RESULT(dvr_none) dvr_end_frame(void) {
             g_dvr_state.vk.graphics_queue,
             1,
             &submit_info,
-            g_dvr_state.vk.in_flight_fences[g_dvr_state.vk.current_frame]
+            g_dvr_state.vk.in_flight_fence
         ) != VK_SUCCESS) {
         return DVR_ERROR(dvr_none, "failed to submit draw command buffer");
     }
@@ -2574,18 +2746,18 @@ DVR_RESULT(dvr_none) dvr_end_frame(void) {
         .waitSemaphoreCount = 1,
         .pWaitSemaphores =
             (VkSemaphore[]){
-                g_dvr_state.vk.render_finished_sems[g_dvr_state.vk.current_frame],
+                g_dvr_state.vk.render_finished_sem,
             },
         .swapchainCount = 1,
         .pSwapchains =
             (VkSwapchainKHR[]){
                 g_dvr_state.vk.swapchain,
             },
-        .pImageIndices = &image_index,
-        .pResults = NULL
+        .pImageIndices = &g_dvr_state.vk.image_index,
+        .pResults = NULL,
     };
 
-    result = vkQueuePresentKHR(g_dvr_state.vk.present_queue, &present_info);
+    VkResult result = vkQueuePresentKHR(g_dvr_state.vk.present_queue, &present_info);
     if (result == VK_ERROR_OUT_OF_DATE_KHR || result == VK_SUBOPTIMAL_KHR ||
         g_dvr_state.window.just_resized) {
         g_dvr_state.window.just_resized = false;
@@ -2596,8 +2768,28 @@ DVR_RESULT(dvr_none) dvr_end_frame(void) {
         return DVR_ERROR(dvr_none, "failed to present swapchain image");
     }
 
-    g_dvr_state.vk.current_frame =
-        (g_dvr_state.vk.current_frame + 1) % DVR_MAX_FRAMES_IN_FLIGHT;
-
     return DVR_OK(dvr_none, DVR_NONE);
+}
+
+bool dvr_should_close(void) {
+    return glfwWindowShouldClose(g_dvr_state.window.window);
+}
+
+void dvr_poll_events(void) {
+    glfwPollEvents();
+}
+
+void dvr_close(void) {
+    glfwSetWindowShouldClose(g_dvr_state.window.window, GLFW_TRUE);
+}
+
+void dvr_wait_idle(void) {
+    vkDeviceWaitIdle(DVR_DEVICE);
+}
+
+void dvr_get_window_size(u32* width, u32* height) {
+    i32 w, h;
+    glfwGetFramebufferSize(g_dvr_state.window.window, &w, &h);
+    *width = (u32)w;
+    *height = (u32)h;
 }
