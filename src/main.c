@@ -73,6 +73,7 @@ static void set_executable_directory(const char* path) {
 }
 
 static DVR_RESULT(dvr_none) app_setup();
+static void app_update();
 static void app_draw();
 static void app_shutdown();
 
@@ -97,6 +98,7 @@ int main(void) {
 
     while (!dvr_should_close()) {
         dvr_poll_events();
+        app_update();
         result = dvr_begin_frame();
         DVR_EXIT_ON_ERROR(result);
 
@@ -121,12 +123,18 @@ typedef struct app_state {
 
     dvr_buffer vertex_buffer;
     dvr_buffer index_buffer;
+    u32 index_count;
     dvr_buffer uniform_buffer;
 
     dvr_descriptor_set_layout descriptor_set_layout;
     dvr_descriptor_set descriptor_set;
 
     dvr_pipeline pipeline;
+
+    f64 start_time;
+    f64 total_time;
+    f64 delta_time;
+    u32 second_frame_count;
 } app_state;
 
 static app_state g_app_state;
@@ -136,33 +144,6 @@ typedef struct vertex {
     vec3 color;
     vec2 uv;
 } vertex;
-
-static const vertex k_vertices[] = {
-    {
-        .pos = { -0.5f, -0.5f, 0.0f },
-        .color = { 1.0f, 0.0f, 0.0f },
-        .uv = { 0.0f, 0.0f },
-    },
-    {
-        .pos = { 0.5f, -0.5f, 0.0f },
-        .color = { 0.0f, 1.0f, 0.0f },
-        .uv = { 1.0f, 0.0f },
-    },
-    {
-        .pos = { 0.5f, 0.5f, 0.0f },
-        .color = { 0.0f, 0.0f, 1.0f },
-        .uv = { 1.0f, 1.0f },
-    },
-    {
-        .pos = { -0.5f, 0.5f, 0.0f },
-        .color = { 1.0f, 1.0f, 1.0f },
-        .uv = { 0.0f, 1.0f },
-    },
-};
-
-static const u32 k_indices[] = {
-    0, 1, 2, 2, 3, 0,
-};
 
 static const VkVertexInputBindingDescription k_vertex_binding_description = {
     .binding = 0,
@@ -225,7 +206,7 @@ static DVR_RESULT(dvr_none) app_setup(void) {
         .usage = VK_IMAGE_USAGE_SAMPLED_BIT,
         .width = (u32)width,
         .height = (u32)height,
-        .format = VK_FORMAT_R8G8B8A8_UNORM,
+        .format = VK_FORMAT_R8G8B8A8_SRGB,
         .tiling = VK_IMAGE_TILING_OPTIMAL,
         .properties = VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT,
     });
@@ -258,31 +239,78 @@ static DVR_RESULT(dvr_none) app_setup(void) {
     DVR_BUBBLE_INTO(dvr_none, sampler_res);
     g_app_state.sampler = DVR_UNWRAP(sampler_res);
 
+    const struct aiScene* scene = aiImportFile(
+        "viking_room.obj",
+        aiProcess_Triangulate | aiProcess_GenNormals | aiProcess_FlipUVs |
+            aiProcess_JoinIdenticalVertices
+    );
+
+    if (!scene) {
+        DVRLOG_ERROR("Failed to load scene");
+        return DVR_ERROR(dvr_none, "Failed to load scene");
+    }
+
+    u32 total_vertices = 0;
+    u32 total_indices = 0;
+    for (u32 i = 0; i < scene->mNumMeshes; i++) {
+        total_vertices += scene->mMeshes[i]->mNumVertices;
+        total_indices += scene->mMeshes[i]->mNumFaces * 3;
+    }
+
+    vertex* vertices = malloc(total_vertices * sizeof(vertex));
+    u32* indices = malloc(total_indices * sizeof(u32));
+
+    for (u32 i = 0; i < scene->mNumMeshes; i++) {
+        const struct aiMesh* mesh = scene->mMeshes[i];
+        for (u32 j = 0; j < mesh->mNumVertices; j++) {
+            vec3 pos = { mesh->mVertices[j].x, mesh->mVertices[j].y, mesh->mVertices[j].z };
+            vec3 color = { 1.0f, 1.0f, 1.0f };
+            vec2 uv = { 0.0f, 0.0f };
+            if (mesh->mTextureCoords[0]) {
+                uv[0] = mesh->mTextureCoords[0][j].x;
+                uv[1] = mesh->mTextureCoords[0][j].y;
+            }
+            glm_vec3_copy(pos, vertices[j].pos);
+            glm_vec3_copy(color, vertices[j].color);
+            glm_vec2_copy(uv, vertices[j].uv);
+        }
+        for (u32 j = 0; j < mesh->mNumFaces; j++) {
+            const struct aiFace* face = &mesh->mFaces[j];
+            for (u32 k = 0; k < face->mNumIndices; k++) {
+                indices[j * face->mNumIndices + k] = face->mIndices[k];
+            }
+        }
+    }
+
     DVR_RESULT(dvr_buffer)
     vertex_buffer_res = dvr_create_buffer(&(dvr_buffer_desc){
         .data =
             (dvr_range){
-                .base = (u8*)k_vertices,
-                .size = sizeof(k_vertices),
+                .base = (u8*)vertices,
+                .size = total_vertices * sizeof(vertex),
             },
         .usage = DVR_BUFFER_USAGE_VERTEX,
         .lifecycle = DVR_BUFFER_LIFECYCLE_STATIC,
     });
-    DVR_BUBBLE_INTO(dvr_none, vertex_buffer_res);
-    g_app_state.vertex_buffer = DVR_UNWRAP(vertex_buffer_res);
 
     DVR_RESULT(dvr_buffer)
     index_buffer_res = dvr_create_buffer(&(dvr_buffer_desc){
         .data =
             (dvr_range){
-                .base = (u8*)k_indices,
-                .size = sizeof(k_indices),
+                .base = (u8*)indices,
+                .size = total_indices * sizeof(u32),
             },
         .usage = DVR_BUFFER_USAGE_INDEX,
         .lifecycle = DVR_BUFFER_LIFECYCLE_STATIC,
     });
+    free(vertices);
+    free(indices);
+
+    DVR_BUBBLE_INTO(dvr_none, vertex_buffer_res);
     DVR_BUBBLE_INTO(dvr_none, index_buffer_res);
+    g_app_state.vertex_buffer = DVR_UNWRAP(vertex_buffer_res);
     g_app_state.index_buffer = DVR_UNWRAP(index_buffer_res);
+    g_app_state.index_count = total_indices;
 
     DVR_RESULT(dvr_buffer)
     uniform_buffer_res = dvr_create_buffer(&(dvr_buffer_desc){
@@ -419,7 +447,7 @@ static DVR_RESULT(dvr_none) app_setup(void) {
             .dst_alpha_blend_factor = VK_BLEND_FACTOR_ZERO,
         },
         .multisample = {
-            .rasterization_samples = VK_SAMPLE_COUNT_1_BIT,
+            .rasterization_samples = dvr_max_msaa_samples(),
             .sample_shading_enable = false,
             .alpha_to_one_enable = false,
             .alpha_to_coverage_enable = false,
@@ -431,8 +459,8 @@ static DVR_RESULT(dvr_none) app_setup(void) {
             .attributes = (VkVertexInputAttributeDescription*)k_vertex_attribute_descriptions,
         },
         .depth_stencil = {
-            .depth_test_enable = false,
-            .depth_write_enable = false,
+            .depth_test_enable = true,
+            .depth_write_enable = true,
             .depth_compare_op = VK_COMPARE_OP_LESS,
             .depth_bounds_test_enable = false,
             .stencil_test_enable = false,
@@ -440,7 +468,7 @@ static DVR_RESULT(dvr_none) app_setup(void) {
         .rasterization = {
             .topology = VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST,
             .polygon_mode = VK_POLYGON_MODE_FILL,
-            .cull_mode = VK_CULL_MODE_NONE,
+            .cull_mode = VK_CULL_MODE_BACK_BIT,
             .front_face = VK_FRONT_FACE_COUNTER_CLOCKWISE,
             .line_width = 1.0f,
             .primitive_restart_enable = false,
@@ -453,18 +481,35 @@ static DVR_RESULT(dvr_none) app_setup(void) {
     dvr_destroy_shader_module(vertex_module);
     dvr_destroy_shader_module(fragment_module);
 
+    struct timespec start_time;
+    clock_gettime(CLOCK_MONOTONIC, &start_time);
+
+    g_app_state.start_time = (f64)start_time.tv_sec + (f64)start_time.tv_nsec / 1.0e9;
+    g_app_state.total_time = 0.0;
+    g_app_state.delta_time = 0.0;
+
     return DVR_OK(dvr_none, DVR_NONE);
 }
 
+static void app_update(void) {
+    g_app_state.second_frame_count++;
+    struct timespec current_time;
+    clock_gettime(CLOCK_MONOTONIC, &current_time);
+
+    f64 last_total_time = g_app_state.total_time;
+
+    f64 current_time_s = (f64)current_time.tv_sec + (f64)current_time.tv_nsec / 1.0e9;
+    g_app_state.delta_time = current_time_s - g_app_state.total_time;
+    g_app_state.total_time = current_time_s - g_app_state.start_time;
+
+    if ((u32)last_total_time != (u32)g_app_state.total_time) {
+        DVRLOG_INFO("Frames: %u", g_app_state.second_frame_count);
+        g_app_state.second_frame_count = 0;
+    }
+}
+
 static void app_draw(void) {
-    dvr_begin_render_pass(
-        dvr_swapchain_render_pass(),
-        dvr_swapchain_framebuffer(),
-        &(VkClearValue){
-            .color = { .float32 = { 0.0f, 0.0f, 0.0f, 1.0f } },
-        },
-        1
-    );
+    dvr_begin_swapchain_render_pass();
 
     dvr_bind_pipeline(g_app_state.pipeline);
 
@@ -478,28 +523,23 @@ static void app_draw(void) {
     };
     u32 width, height;
     dvr_get_window_size(&width, &height);
-    glm_perspective(
-        (f32)GLM_PI_4,
-        (f32)width / (f32)height,
-        0.1f,
-        100.0f,
-        view_uniform.proj
-    );
+    glm_perspective((f32)GLM_PI_4, (f32)width / (f32)height, 0.1f, 100.0f, view_uniform.proj);
+    // vulkan has +y down, glm has +y up, so we need to correct the y axis
+    view_uniform.proj[1][1] *= -1.0f;
+
+    f32 x = sinf((f32)g_app_state.total_time) * 2.0f;
+    f32 z = cosf((f32)g_app_state.total_time) * 2.0f;
     glm_lookat(
-        (vec3){ 0.0f, 0.0f, 2.0f },
-        (vec3){ 0.0f, 0.0f, 0.0f },
+        (vec3){ x, 1.66f, z },
+        (vec3){ 0.0f, 0.2f, 0.0f },
         (vec3){ 0.0f, 1.0f, 0.0f },
         view_uniform.view
     );
 
-    dvr_write_buffer(
-        g_app_state.uniform_buffer,
-        DVR_RANGE(view_uniform),
-        0
-    );
+    dvr_write_buffer(g_app_state.uniform_buffer, DVR_RANGE(view_uniform), 0);
     dvr_bind_descriptor_set(g_app_state.pipeline, g_app_state.descriptor_set);
 
-    vkCmdDrawIndexed(dvr_command_buffer(), 6, 1, 0, 0, 0);
+    vkCmdDrawIndexed(dvr_command_buffer(), g_app_state.index_count, 1, 0, 0, 0);
 
     dvr_end_render_pass();
 }

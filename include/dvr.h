@@ -16,9 +16,6 @@ typedef struct dvr_setup_desc {
     const char* app_name;
 } dvr_setup_desc;
 
-VkFormat dvr_get_swapchain_format();
-VkSampleCountFlagBits dvr_get_max_sample_count();
-
 typedef enum dvr_buffer_lifecycle {
     DVR_BUFFER_LIFECYCLE_STATIC,
     DVR_BUFFER_LIFECYCLE_DYNAMIC,
@@ -311,8 +308,10 @@ DVR_RESULT(dvr_none) dvr_setup(dvr_setup_desc* desc);
 void dvr_shutdown();
 
 VkFormat dvr_swapchain_format();
+VkSampleCountFlags dvr_max_msaa_samples();
 dvr_framebuffer dvr_swapchain_framebuffer();
 dvr_render_pass dvr_swapchain_render_pass();
+void dvr_begin_swapchain_render_pass();
 
 VkCommandBuffer dvr_command_buffer();
 #define DVR_COMMAND_BUFFER dvr_command_buffer()

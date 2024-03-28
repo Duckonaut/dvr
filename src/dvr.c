@@ -110,7 +110,7 @@ typedef struct dvr_state {
         VkDescriptorPool descriptor_pool;
         VkCommandPool command_pool;
         VkCommandBuffer command_buffer;
-        VkSampleCountFlagBits msaa_samples;
+        VkSampleCountFlagBits max_msaa_samples;
         VkSemaphore image_available_sem;
         VkSemaphore render_finished_sem;
         VkFence in_flight_fence;
@@ -137,6 +137,8 @@ typedef struct dvr_state {
         u64 descriptor_set_usage_map[DVR_MAX_DESCRIPTOR_SETS / 64];
     } res;
     struct {
+        dvr_image swapchain_render_image;
+        dvr_image swapchain_depth_image;
         dvr_render_pass swapchain_render_pass;
         dvr_image* swapchain_images;
         dvr_framebuffer* swapchain_framebuffers;
@@ -2115,20 +2117,34 @@ static VkSampleCountFlagBits _dvr_vk_get_max_usable_sample_count() {
     VkSampleCountFlags counts = properties.limits.framebufferColorSampleCounts &
                                 properties.limits.framebufferDepthSampleCounts;
 
-    if (counts & VK_SAMPLE_COUNT_64_BIT)
+    if (counts & VK_SAMPLE_COUNT_64_BIT) {
+        DVRLOG_INFO("max msaa samples: 64");
         return VK_SAMPLE_COUNT_64_BIT;
-    if (counts & VK_SAMPLE_COUNT_32_BIT)
+    }
+    if (counts & VK_SAMPLE_COUNT_32_BIT) {
+        DVRLOG_INFO("max msaa samples: 32");
         return VK_SAMPLE_COUNT_32_BIT;
-    if (counts & VK_SAMPLE_COUNT_16_BIT)
+    }
+    if (counts & VK_SAMPLE_COUNT_16_BIT) {
+        DVRLOG_INFO("max msaa samples: 16");
         return VK_SAMPLE_COUNT_16_BIT;
-    if (counts & VK_SAMPLE_COUNT_8_BIT)
+    }
+    if (counts & VK_SAMPLE_COUNT_8_BIT) {
+        DVRLOG_INFO("max msaa samples: 8");
         return VK_SAMPLE_COUNT_8_BIT;
-    if (counts & VK_SAMPLE_COUNT_4_BIT)
+    }
+    if (counts & VK_SAMPLE_COUNT_4_BIT) {
+        DVRLOG_INFO("max msaa samples: 4");
         return VK_SAMPLE_COUNT_4_BIT;
-    if (counts & VK_SAMPLE_COUNT_2_BIT)
+    }
+    if (counts & VK_SAMPLE_COUNT_2_BIT) {
+        DVRLOG_INFO("max msaa samples: 2");
         return VK_SAMPLE_COUNT_2_BIT;
-    if (counts & VK_SAMPLE_COUNT_1_BIT)
+    }
+    if (counts & VK_SAMPLE_COUNT_1_BIT) {
+        DVRLOG_INFO("max msaa samples: 1");
         return VK_SAMPLE_COUNT_1_BIT;
+    }
 
     return VK_SAMPLE_COUNT_1_BIT;
 }
@@ -2159,7 +2175,7 @@ static DVR_RESULT(dvr_none) dvr_vk_pick_physical_device(void) {
     }
 
     g_dvr_state.vk.physical_device = devices[best_index];
-    g_dvr_state.vk.msaa_samples = _dvr_vk_get_max_usable_sample_count();
+    g_dvr_state.vk.max_msaa_samples = _dvr_vk_get_max_usable_sample_count();
 
     free(devices);
     free(device_scores);
@@ -2341,20 +2357,76 @@ static DVR_RESULT(dvr_none) dvr_vk_create_swapchain_render_pass(void) {
             (dvr_render_pass_attachment_desc){
                 .enable = true,
                 .format = g_dvr_state.vk.swapchain_format,
-                .samples = VK_SAMPLE_COUNT_1_BIT,
+                .samples = g_dvr_state.vk.max_msaa_samples,
                 .load_op = VK_ATTACHMENT_LOAD_OP_CLEAR,
+                .store_op = VK_ATTACHMENT_STORE_OP_STORE,
+                .stencil_load_op = VK_ATTACHMENT_LOAD_OP_DONT_CARE,
+                .stencil_store_op = VK_ATTACHMENT_STORE_OP_DONT_CARE,
+                .initial_layout = VK_IMAGE_LAYOUT_UNDEFINED,
+                .final_layout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
+            },
+        .num_resolve_attachments = 1,
+        .resolve_attachments[0] =
+            (dvr_render_pass_attachment_desc){
+                .enable = true,
+                .format = g_dvr_state.vk.swapchain_format,
+                .samples = VK_SAMPLE_COUNT_1_BIT,
+                .load_op = VK_ATTACHMENT_LOAD_OP_DONT_CARE,
                 .store_op = VK_ATTACHMENT_STORE_OP_STORE,
                 .stencil_load_op = VK_ATTACHMENT_LOAD_OP_DONT_CARE,
                 .stencil_store_op = VK_ATTACHMENT_STORE_OP_DONT_CARE,
                 .initial_layout = VK_IMAGE_LAYOUT_UNDEFINED,
                 .final_layout = VK_IMAGE_LAYOUT_PRESENT_SRC_KHR,
             },
-        .num_resolve_attachments = 0,
+        .depth_stencil_attachment =
+            (dvr_render_pass_attachment_desc){
+                .enable = true,
+                .format = VK_FORMAT_D32_SFLOAT,
+                .samples = g_dvr_state.vk.max_msaa_samples,
+                .load_op = VK_ATTACHMENT_LOAD_OP_CLEAR,
+                .store_op = VK_ATTACHMENT_STORE_OP_DONT_CARE,
+                .stencil_load_op = VK_ATTACHMENT_LOAD_OP_DONT_CARE,
+                .stencil_store_op = VK_ATTACHMENT_STORE_OP_DONT_CARE,
+                .initial_layout = VK_IMAGE_LAYOUT_UNDEFINED,
+                .final_layout = VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL,
+            },
     });
 
     DVR_BUBBLE_INTO(dvr_none, rp_res);
 
     g_dvr_state.defaults.swapchain_render_pass = DVR_UNWRAP(rp_res);
+
+    return DVR_OK(dvr_none, DVR_NONE);
+}
+
+static DVR_RESULT(dvr_none) dvr_vk_create_render_targets(void) {
+    DVR_RESULT(dvr_image) res;
+
+    res = dvr_create_image(&(dvr_image_desc){
+        .usage = VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT,
+        .width = g_dvr_state.vk.swapchain_extent.width,
+        .height = g_dvr_state.vk.swapchain_extent.height,
+        .format = g_dvr_state.vk.swapchain_format,
+        .tiling = VK_IMAGE_TILING_OPTIMAL,
+        .properties = VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT,
+        .num_samples = g_dvr_state.vk.max_msaa_samples,
+    });
+    DVR_BUBBLE_INTO(dvr_none, res);
+
+    g_dvr_state.defaults.swapchain_render_image = DVR_UNWRAP(res);
+
+    res = dvr_create_image(&(dvr_image_desc){
+        .usage = VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT,
+        .width = g_dvr_state.vk.swapchain_extent.width,
+        .height = g_dvr_state.vk.swapchain_extent.height,
+        .format = VK_FORMAT_D32_SFLOAT,
+        .tiling = VK_IMAGE_TILING_OPTIMAL,
+        .properties = VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT,
+        .num_samples = g_dvr_state.vk.max_msaa_samples,
+    });
+    DVR_BUBBLE_INTO(dvr_none, res);
+
+    g_dvr_state.defaults.swapchain_depth_image = DVR_UNWRAP(res);
 
     return DVR_OK(dvr_none, DVR_NONE);
 }
@@ -2371,8 +2443,13 @@ static DVR_RESULT(dvr_none) dvr_vk_create_swapchain_framebuffers(void) {
             .render_pass = g_dvr_state.defaults.swapchain_render_pass,
             .width = g_dvr_state.vk.swapchain_extent.width,
             .height = g_dvr_state.vk.swapchain_extent.height,
-            .num_attachments = 1,
-            .attachments = &g_dvr_state.defaults.swapchain_images[i],
+            .num_attachments = 3,
+            .attachments =
+                (dvr_image[]){
+                    g_dvr_state.defaults.swapchain_render_image,
+                    g_dvr_state.defaults.swapchain_images[i],
+                    g_dvr_state.defaults.swapchain_depth_image,
+                },
         });
         DVR_BUBBLE_INTO(dvr_none, fb_res);
 
@@ -2500,6 +2577,9 @@ static DVR_RESULT(dvr_none) dvr_vk_setup(dvr_setup_desc* desc) {
     res = dvr_vk_create_swapchain_render_pass();
     DVR_BUBBLE(res);
 
+    res = dvr_vk_create_render_targets();
+    DVR_BUBBLE(res);
+
     res = dvr_vk_create_swapchain_framebuffers();
     DVR_BUBBLE(res);
 
@@ -2575,6 +2655,8 @@ DVR_RESULT(dvr_none) dvr_setup(dvr_setup_desc* desc) {
 }
 
 static void dvr_vk_cleanup_swapchain(void) {
+    dvr_destroy_image(g_dvr_state.defaults.swapchain_render_image);
+    dvr_destroy_image(g_dvr_state.defaults.swapchain_depth_image);
     for (usize i = 0; i < arrlenu(g_dvr_state.defaults.swapchain_framebuffers); i++) {
         dvr_destroy_framebuffer(g_dvr_state.defaults.swapchain_framebuffers[i]);
     }
@@ -2634,12 +2716,39 @@ void dvr_shutdown(void) {
     dvr_log_close();
 }
 
+VkFormat dvr_swapchain_format(void) {
+    return g_dvr_state.vk.swapchain_format;
+}
+
+VkSampleCountFlags dvr_max_msaa_samples(void) {
+    return g_dvr_state.vk.max_msaa_samples;
+}
+
 dvr_framebuffer dvr_swapchain_framebuffer(void) {
     return g_dvr_state.defaults.swapchain_framebuffers[g_dvr_state.vk.image_index];
 }
 
 dvr_render_pass dvr_swapchain_render_pass(void) {
     return g_dvr_state.defaults.swapchain_render_pass;
+}
+
+void dvr_begin_swapchain_render_pass(void) {
+    dvr_begin_render_pass(
+        dvr_swapchain_render_pass(),
+        dvr_swapchain_framebuffer(),
+        (VkClearValue[]){
+            {
+                .color = { { 0.0f, 0.0f, 0.0f, 1.0f } },
+            },
+            {
+                .color = { { 0.0f, 0.0f, 0.0f, 1.0f } },
+            },
+            {
+                .depthStencil = { 1.0f, 0 },
+            },
+        },
+        3
+    );
 }
 
 VkCommandBuffer dvr_command_buffer(void) {
@@ -2666,6 +2775,9 @@ static DVR_RESULT(dvr_none) dvr_vk_recreate_swapchain(void) {
     DVR_BUBBLE(res);
 
     res = dvr_vk_create_swapchain_render_pass();
+    DVR_BUBBLE(res);
+
+    res = dvr_vk_create_render_targets();
     DVR_BUBBLE(res);
 
     res = dvr_vk_create_swapchain_framebuffers();
