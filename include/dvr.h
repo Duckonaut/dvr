@@ -331,5 +331,7 @@ void dvr_imgui_shutdown();
 
 void dvr_imgui_begin_frame();
 void dvr_imgui_render();
+
+void dvr_imgui_info(void);
 #endif
 

@@ -43,7 +43,7 @@ release:
 
 [unix]
 run: build
-    ./build/dvr
+    ./build/examples/example
 
 [windows]
 run: build

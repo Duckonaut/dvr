@@ -15,7 +15,6 @@
 #define CIMGUI_DEFINE_ENUMS_AND_STRUCTS
 #include <cimgui.h>
 
-#include <stdint.h>
 #include <signal.h>
 #include <string.h>
 
@@ -29,9 +28,9 @@
 #define APP_WINDOW_WIDTH 640
 #define APP_WINDOW_HEIGHT 480
 #ifdef RELEASE
-#define APP_WINDOW_NAME PROJECT_NAME
+#define APP_WINDOW_NAME "model"
 #else
-#define APP_WINDOW_NAME "dev: " PROJECT_NAME
+#define APP_WINDOW_NAME "dev: model"
 #endif
 
 void term_handler(int signum) {
@@ -223,7 +222,7 @@ static DVR_RESULT(dvr_none) app_setup(void) {
         .usage = VK_IMAGE_USAGE_SAMPLED_BIT,
         .width = (u32)width,
         .height = (u32)height,
-        .format = VK_FORMAT_R8G8B8A8_SRGB,
+        .format = VK_FORMAT_R8G8B8A8_UNORM,
         .tiling = VK_IMAGE_TILING_OPTIMAL,
         .properties = VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT,
     });
@@ -579,6 +578,8 @@ static void app_draw_imgui(void) {
     igText("FPS: %.1f", 1.0f / avg_frametime);
 
     igEnd();
+
+    dvr_imgui_info();
 }
 
 static void app_shutdown(void) {

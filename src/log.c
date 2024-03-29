@@ -19,7 +19,7 @@ void dvr_log_init() {
     }
 
 #ifdef RELEASE
-    g_dvr_log_file = fopen("log.txt", "w");
+    g_dvr_log_file = fopen("dvr_log.txt", "w");
 #endif
 }
 
@@ -33,7 +33,7 @@ void dvr_log_close() {
 
 void dvr_log_init(void) {
 #ifdef RELEASE
-    g_dvr_log_file = fopen("log.txt", "w");
+    g_dvr_log_file = fopen("dvr_log.txt", "w");
 #endif
 }
 

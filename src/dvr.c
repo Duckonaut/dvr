@@ -98,6 +98,7 @@ typedef struct dvr_state {
         VkInstance instance;
         VkDebugUtilsMessengerEXT debug_messenger;
         VkPhysicalDevice physical_device;
+        VkPhysicalDeviceProperties physical_device_props;
         VkDevice device;
         VkQueue graphics_queue;
         VkQueue present_queue;
@@ -158,9 +159,13 @@ static dvr_state g_dvr_state;
 
 #define DVR_DEVICE g_dvr_state.vk.device
 
-static u16 dvr_find_free_slot(usize* usage_map, u16 len) {
+static inline bool dvr_is_slot_used(u64* usage_map, u16 slot) {
+    return (usage_map[slot / 64] & (1ULL << (slot % 64))) != 0;
+}
+
+static u16 dvr_find_free_slot(u64* usage_map, u16 len) {
     for (u16 i = 0; i < len; i++) {
-        if ((usage_map[i / 64] & (1ULL << (i % 64))) == 0) {
+        if (!dvr_is_slot_used(usage_map, i)) {
             return i;
         }
     }
@@ -168,11 +173,13 @@ static u16 dvr_find_free_slot(usize* usage_map, u16 len) {
     return (u16)~0;
 }
 
-static void dvr_set_slot_used(usize* usage_map, u16 slot) {
+static void dvr_set_slot_used(u64* usage_map, u16 slot) {
+    /// set the bit at slot to 1
     usage_map[slot / 64] |= 1ULL << (slot % 64);
 }
 
-static void dvr_set_slot_free(usize* usage_map, u16 slot) {
+static void dvr_set_slot_free(u64* usage_map, u16 slot) {
+    // set the bit at slot to 0
     usage_map[slot / 64] &= ~(1ULL << (slot % 64));
 }
 
@@ -953,6 +960,9 @@ void dvr_destroy_image(dvr_image image) {
     dvr_vk_destroy_image(image);
 
     dvr_set_slot_free(g_dvr_state.res.image_usage_map, image.id);
+
+    u64 usage = g_dvr_state.res.image_usage_map[image.id / 64];
+    (void)usage;
 }
 
 // DVR_SAMPLER FUNCTIONS
@@ -1975,7 +1985,7 @@ static swapchain_support_details query_swapchain_support(VkPhysicalDevice dev) {
 
 static VkSurfaceFormatKHR choose_swapchain_format(const VkSurfaceFormatKHR* formats, usize n) {
     for (usize i = 0; i < n; i++) {
-        if (formats[i].format == VK_FORMAT_R8G8B8A8_SRGB &&
+        if (formats[i].format == VK_FORMAT_R8G8B8A8_UNORM &&
             formats[i].colorSpace == VK_COLOR_SPACE_SRGB_NONLINEAR_KHR) {
             return formats[i];
         }
@@ -2180,6 +2190,12 @@ static DVR_RESULT(dvr_none) dvr_vk_pick_physical_device(void) {
     }
 
     g_dvr_state.vk.physical_device = devices[best_index];
+
+    vkGetPhysicalDeviceProperties(
+        g_dvr_state.vk.physical_device,
+        &g_dvr_state.vk.physical_device_props
+    );
+    DVRLOG_INFO("selected GPU: %s", g_dvr_state.vk.physical_device_props.deviceName);
     g_dvr_state.vk.max_msaa_samples = _dvr_vk_get_max_usable_sample_count();
 
     free(devices);
@@ -2669,6 +2685,16 @@ static void dvr_vk_cleanup_swapchain(void) {
     for (usize i = 0; i < arrlenu(g_dvr_state.vk.swapchain_image_views); i++) {
         vkDestroyImageView(DVR_DEVICE, g_dvr_state.vk.swapchain_image_views[i], NULL);
     }
+    // free slots
+    for (usize i = 0; i < arrlenu(g_dvr_state.defaults.swapchain_images); i++) {
+        dvr_set_slot_free(
+            g_dvr_state.res.image_usage_map,
+            g_dvr_state.defaults.swapchain_images[i].id
+        );
+    }
+    arrsetlen(g_dvr_state.vk.swapchain_image_views, 0);
+    arrsetlen(g_dvr_state.defaults.swapchain_images, 0);
+    arrsetlen(g_dvr_state.defaults.swapchain_framebuffers, 0);
     dvr_destroy_render_pass(g_dvr_state.defaults.swapchain_render_pass);
     vkDestroySwapchainKHR(DVR_DEVICE, g_dvr_state.vk.swapchain, NULL);
 }
@@ -3036,4 +3062,409 @@ void dvr_imgui_render(void) {
     ImGui_ImplVulkan_RenderDrawData(draw_data, g_dvr_state.vk.command_buffer, VK_NULL_HANDLE);
 }
 
+#define _IM_COL32(r, g, b, a) (((u32)(a) << 24) | ((u32)(b) << 16) | ((u32)(g) << 8) | (u32)(r))
+
+void dvr_imgui_info(void) {
+    igBegin("dvr state", NULL, 0);
+
+    igText("dvr version: %s", PROJECT_VERSION);
+
+    // vulkan info
+    if (igCollapsingHeader_TreeNodeFlags("vulkan", 0)) {
+        igIndent(16.0f);
+        igText(
+            "vulkan version: %d.%d.%d",
+            VK_VERSION_MAJOR(VK_HEADER_VERSION_COMPLETE),
+            VK_VERSION_MINOR(VK_HEADER_VERSION_COMPLETE),
+            VK_VERSION_PATCH(VK_HEADER_VERSION_COMPLETE)
+        );
+
+        igText("physical device: %p", g_dvr_state.vk.physical_device);
+        igText("physical device name: %s", g_dvr_state.vk.physical_device_props.deviceName);
+        igText("max msaa samples: %d", g_dvr_state.vk.max_msaa_samples);
+        igUnindent(16.0f);
+    }
+
+    // window info
+    if (igCollapsingHeader_TreeNodeFlags("window", 0)) {
+        igIndent(16.0f);
+        i32 width, height;
+        glfwGetFramebufferSize(g_dvr_state.window.window, &width, &height);
+        igText("window size: %d x %d", width, height);
+        igUnindent(16.0f);
+    }
+
+    // dvr objects
+    if (igCollapsingHeader_TreeNodeFlags("objects", 0)) {
+        // indent everything
+        igIndent(16.0f);
+        if (igCollapsingHeader_TreeNodeFlags("images", ImGuiTreeNodeFlags_Bullet)) {
+            if (igBeginTable(
+                    "images_table",
+                    16,
+                    ImGuiTableFlags_Borders,
+                    (ImVec2){ 0, 0 },
+                    0
+                )) {
+                for (u16 i = 0; i < DVR_MAX_IMAGES; i++) {
+                    if (!igTableNextColumn()) {
+                        break;
+                    }
+                    if (dvr_is_slot_used(g_dvr_state.res.image_usage_map, i)) {
+                        igTableSetBgColor(
+                            ImGuiTableBgTarget_CellBg,
+                            _IM_COL32(64, 64, 128, 128),
+                            i % 16
+                        );
+                        dvr_image_data* data = &g_dvr_state.res.images[i];
+                        igText("%d", i);
+                        if (igIsItemHovered(ImGuiHoveredFlags_None)) {
+                            igBeginTooltip();
+                            igText("width: %d", data->width);
+                            igText("height: %d", data->height);
+                            igText("vk.image: %p", data->vk.image);
+                            igText("vk.view: %p", data->vk.view);
+                            igEndTooltip();
+                        }
+
+                    } else {
+                        igTableSetBgColor(
+                            ImGuiTableBgTarget_CellBg,
+                            _IM_COL32(0, 0, 0, 0),
+                            i % 16
+                        );
+                        igText("");
+                    }
+                }
+                igEndTable();
+            }
+        }
+        if (igCollapsingHeader_TreeNodeFlags("buffers", ImGuiTreeNodeFlags_Bullet)) {
+            if (igBeginTable(
+                    "buffers_table",
+                    16,
+                    ImGuiTableFlags_Borders,
+                    (ImVec2){ 0, 0 },
+                    0
+                )) {
+                for (u16 i = 0; i < DVR_MAX_BUFFERS; i++) {
+                    if (!igTableNextColumn()) {
+                        break;
+                    }
+                    if (dvr_is_slot_used(g_dvr_state.res.buffer_usage_map, i)) {
+                        igTableSetBgColor(
+                            ImGuiTableBgTarget_CellBg,
+                            _IM_COL32(64, 64, 128, 128),
+                            i % 16
+                        );
+                        dvr_buffer_data* data = &g_dvr_state.res.buffers[i];
+                        igText("%d", i);
+                        if (igIsItemHovered(ImGuiHoveredFlags_None)) {
+                            igBeginTooltip();
+                            igText(
+                                "lifecycle: %s",
+                                data->lifecycle == DVR_BUFFER_LIFECYCLE_STATIC ? "static"
+                                                                               : "dynamic"
+                            );
+                            igText("vk.buffer: %p", data->vk.buffer);
+                            igText("vk.memory: %p", data->vk.memory);
+                            if (data->lifecycle == DVR_BUFFER_LIFECYCLE_DYNAMIC) {
+                                igText("vk.memmap: %p", data->vk.memmap);
+                            }
+                            igEndTooltip();
+                        }
+
+                    } else {
+                        igTableSetBgColor(
+                            ImGuiTableBgTarget_CellBg,
+                            _IM_COL32(0, 0, 0, 0),
+                            i % 16
+                        );
+                        igText("");
+                    }
+                }
+                igEndTable();
+            }
+        }
+
+        if (igCollapsingHeader_TreeNodeFlags("samplers", ImGuiTreeNodeFlags_Bullet)) {
+            if (igBeginTable(
+                    "samplers_table",
+                    16,
+                    ImGuiTableFlags_Borders,
+                    (ImVec2){ 0, 0 },
+                    0
+                )) {
+                for (u16 i = 0; i < DVR_MAX_SAMPLERS; i++) {
+                    if (!igTableNextColumn()) {
+                        break;
+                    }
+                    if (dvr_is_slot_used(g_dvr_state.res.sampler_usage_map, i)) {
+                        igTableSetBgColor(
+                            ImGuiTableBgTarget_CellBg,
+                            _IM_COL32(64, 64, 128, 128),
+                            i % 16
+                        );
+                        dvr_sampler_data* data = &g_dvr_state.res.samplers[i];
+                        igText("%d", i);
+                        if (igIsItemHovered(ImGuiHoveredFlags_None)) {
+                            igBeginTooltip();
+                            igText("vk.sampler: %p", data->vk.sampler);
+                            igEndTooltip();
+                        }
+
+                    } else {
+                        igTableSetBgColor(
+                            ImGuiTableBgTarget_CellBg,
+                            _IM_COL32(0, 0, 0, 0),
+                            i % 16
+                        );
+                        igText("");
+                    }
+                }
+                igEndTable();
+            }
+        }
+
+        if (igCollapsingHeader_TreeNodeFlags("render passes", ImGuiTreeNodeFlags_Bullet)) {
+            if (igBeginTable(
+                    "renderpasses_table",
+                    16,
+                    ImGuiTableFlags_Borders,
+                    (ImVec2){ 0, 0 },
+                    0
+                )) {
+                for (u16 i = 0; i < DVR_MAX_RENDER_PASSES; i++) {
+                    if (!igTableNextColumn()) {
+                        break;
+                    }
+                    if (dvr_is_slot_used(g_dvr_state.res.render_pass_usage_map, i)) {
+                        igTableSetBgColor(
+                            ImGuiTableBgTarget_CellBg,
+                            _IM_COL32(64, 64, 128, 128),
+                            i % 16
+                        );
+                        dvr_render_pass_data* data = &g_dvr_state.res.render_passes[i];
+                        igText("%d", i);
+                        if (igIsItemHovered(ImGuiHoveredFlags_None)) {
+                            igBeginTooltip();
+                            igText("vk.render_pass: %p", data->vk.render_pass);
+                            igEndTooltip();
+                        }
+
+                    } else {
+                        igTableSetBgColor(
+                            ImGuiTableBgTarget_CellBg,
+                            _IM_COL32(0, 0, 0, 0),
+                            i % 16
+                        );
+                        igText("");
+                    }
+                }
+                igEndTable();
+            }
+        }
+
+        if (igCollapsingHeader_TreeNodeFlags("framebuffers", ImGuiTreeNodeFlags_Bullet)) {
+            if (igBeginTable(
+                    "framebuffers_table",
+                    16,
+                    ImGuiTableFlags_Borders,
+                    (ImVec2){ 0, 0 },
+                    0
+                )) {
+                for (u16 i = 0; i < DVR_MAX_FRAMEBUFFERS; i++) {
+                    if (!igTableNextColumn()) {
+                        break;
+                    }
+                    if (dvr_is_slot_used(g_dvr_state.res.framebuffer_usage_map, i)) {
+                        igTableSetBgColor(
+                            ImGuiTableBgTarget_CellBg,
+                            _IM_COL32(64, 64, 128, 128),
+                            i % 16
+                        );
+                        dvr_framebuffer_data* data = &g_dvr_state.res.framebuffers[i];
+                        igText("%d", i);
+                        if (igIsItemHovered(ImGuiHoveredFlags_None)) {
+                            igBeginTooltip();
+                            igText("vk.framebuffer: %p", data->vk.framebuffer);
+                            igEndTooltip();
+                        }
+
+                    } else {
+                        igTableSetBgColor(
+                            ImGuiTableBgTarget_CellBg,
+                            _IM_COL32(0, 0, 0, 0),
+                            i % 16
+                        );
+                        igText("");
+                    }
+                }
+                igEndTable();
+            }
+        }
+
+        if (igCollapsingHeader_TreeNodeFlags(
+                "descriptor set layouts",
+                ImGuiTreeNodeFlags_Bullet
+            )) {
+            if (igBeginTable(
+                    "descriptor_set_layouts_table",
+                    16,
+                    ImGuiTableFlags_Borders,
+                    (ImVec2){ 0, 0 },
+                    0
+                )) {
+                for (u16 i = 0; i < DVR_MAX_DESCRIPTOR_SET_LAYOUTS; i++) {
+                    if (!igTableNextColumn()) {
+                        break;
+                    }
+                    if (dvr_is_slot_used(g_dvr_state.res.descriptor_set_layout_usage_map, i)) {
+                        igTableSetBgColor(
+                            ImGuiTableBgTarget_CellBg,
+                            _IM_COL32(64, 64, 128, 128),
+                            i % 16
+                        );
+                        dvr_descriptor_set_layout_data* data =
+                            &g_dvr_state.res.descriptor_set_layouts[i];
+                        igText("%d", i);
+                        if (igIsItemHovered(ImGuiHoveredFlags_None)) {
+                            igBeginTooltip();
+                            igText("vk.descriptor_set_layout: %p", data->vk.layout);
+                            igEndTooltip();
+                        }
+
+                    } else {
+                        igTableSetBgColor(
+                            ImGuiTableBgTarget_CellBg,
+                            _IM_COL32(0, 0, 0, 0),
+                            i % 16
+                        );
+                        igText("");
+                    }
+                }
+                igEndTable();
+            }
+        }
+
+        if (igCollapsingHeader_TreeNodeFlags("descriptor sets", ImGuiTreeNodeFlags_Bullet)) {
+            if (igBeginTable(
+                    "descriptor_sets_table",
+                    16,
+                    ImGuiTableFlags_Borders,
+                    (ImVec2){ 0, 0 },
+                    0
+                )) {
+                for (u16 i = 0; i < DVR_MAX_DESCRIPTOR_SETS; i++) {
+                    if (!igTableNextColumn()) {
+                        break;
+                    }
+                    if (dvr_is_slot_used(g_dvr_state.res.descriptor_set_usage_map, i)) {
+                        igTableSetBgColor(
+                            ImGuiTableBgTarget_CellBg,
+                            _IM_COL32(64, 64, 128, 128),
+                            i % 16
+                        );
+                        dvr_descriptor_set_data* data = &g_dvr_state.res.descriptor_sets[i];
+                        igText("%d", i);
+                        if (igIsItemHovered(ImGuiHoveredFlags_None)) {
+                            igBeginTooltip();
+                            igText("vk.descriptor_set: %p", data->vk.set);
+                            igEndTooltip();
+                        }
+
+                    } else {
+                        igTableSetBgColor(
+                            ImGuiTableBgTarget_CellBg,
+                            _IM_COL32(0, 0, 0, 0),
+                            i % 16
+                        );
+                        igText("");
+                    }
+                }
+                igEndTable();
+            }
+        }
+
+        if (igCollapsingHeader_TreeNodeFlags("pipelines", ImGuiTreeNodeFlags_Bullet)) {
+            if (igBeginTable(
+                    "pipelines_table",
+                    16,
+                    ImGuiTableFlags_Borders,
+                    (ImVec2){ 0, 0 },
+                    0
+                )) {
+                for (u16 i = 0; i < DVR_MAX_PIPELINES; i++) {
+                    if (!igTableNextColumn()) {
+                        break;
+                    }
+                    if (dvr_is_slot_used(g_dvr_state.res.pipeline_usage_map, i)) {
+                        igTableSetBgColor(
+                            ImGuiTableBgTarget_CellBg,
+                            _IM_COL32(64, 64, 128, 128),
+                            i % 16
+                        );
+                        dvr_pipeline_data* data = &g_dvr_state.res.pipelines[i];
+                        igText("%d", i);
+                        if (igIsItemHovered(ImGuiHoveredFlags_None)) {
+                            igBeginTooltip();
+                            igText("vk.pipeline: %p", data->vk.pipeline);
+                            igEndTooltip();
+                        }
+
+                    } else {
+                        igTableSetBgColor(
+                            ImGuiTableBgTarget_CellBg,
+                            _IM_COL32(0, 0, 0, 0),
+                            i % 16
+                        );
+                        igText("");
+                    }
+                }
+                igEndTable();
+            }
+        }
+        if (igCollapsingHeader_TreeNodeFlags("shader modules", ImGuiTreeNodeFlags_Bullet)) {
+            if (igBeginTable(
+                    "shader_modules_table",
+                    16,
+                    ImGuiTableFlags_Borders,
+                    (ImVec2){ 0, 0 },
+                    0
+                )) {
+                for (u16 i = 0; i < DVR_MAX_SHADER_MODULES; i++) {
+                    if (!igTableNextColumn()) {
+                        break;
+                    }
+                    if (dvr_is_slot_used(g_dvr_state.res.shader_module_usage_map, i)) {
+                        igTableSetBgColor(
+                            ImGuiTableBgTarget_CellBg,
+                            _IM_COL32(64, 64, 128, 128),
+                            i % 16
+                        );
+                        dvr_shader_module_data* data = &g_dvr_state.res.shader_modules[i];
+                        igText("%d", i);
+                        if (igIsItemHovered(ImGuiHoveredFlags_None)) {
+                            igBeginTooltip();
+                            igText("vk.shader_module: %p", data->vk.module);
+                            igEndTooltip();
+                        }
+
+                    } else {
+                        igTableSetBgColor(
+                            ImGuiTableBgTarget_CellBg,
+                            _IM_COL32(0, 0, 0, 0),
+                            i % 16
+                        );
+                        igText("");
+                    }
+                }
+                igEndTable();
+            }
+        }
+        igUnindent(16.0f);
+    }
+
+    igEnd();
+}
 #endif
