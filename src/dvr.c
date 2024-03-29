@@ -147,6 +147,11 @@ typedef struct dvr_state {
         GLFWwindow* window;
         bool just_resized;
     } window;
+#ifdef DVR_ENABLE_IMGUI
+    struct {
+        VkDescriptorPool pool;
+    } imgui;
+#endif
 } dvr_state;
 
 static dvr_state g_dvr_state;
@@ -2207,6 +2212,7 @@ static DVR_RESULT(dvr_none) dvr_vk_create_logical_device(void) {
 
     VkPhysicalDeviceFeatures device_features = {
         .samplerAnisotropy = VK_TRUE,
+        .fillModeNonSolid = VK_TRUE,
     };
 
     VkDeviceCreateInfo device_create_info = {
@@ -2905,3 +2911,129 @@ void dvr_get_window_size(u32* width, u32* height) {
     *width = (u32)w;
     *height = (u32)h;
 }
+
+#ifdef DVR_ENABLE_IMGUI
+#define CIMGUI_DEFINE_ENUMS_AND_STRUCTS
+#include <cimgui.h>
+
+#define CIMGUI_USE_VULKAN
+#define CIMGUI_USE_GLFW
+#include <generator/output/cimgui_impl.h>
+
+#define _DVR_MAX_IMGUI_DESCRIPTOR_SETS 100
+
+static const VkDescriptorPoolSize k_imgui_pool_sizes[] = {
+    {
+        .type = VK_DESCRIPTOR_TYPE_SAMPLER,
+        .descriptorCount = _DVR_MAX_IMGUI_DESCRIPTOR_SETS,
+    },
+    {
+        .type = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
+        .descriptorCount = _DVR_MAX_IMGUI_DESCRIPTOR_SETS,
+    },
+    {
+        .type = VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE,
+        .descriptorCount = _DVR_MAX_IMGUI_DESCRIPTOR_SETS,
+    },
+    {
+        .type = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE,
+        .descriptorCount = _DVR_MAX_IMGUI_DESCRIPTOR_SETS,
+    },
+    {
+        .type = VK_DESCRIPTOR_TYPE_UNIFORM_TEXEL_BUFFER,
+        .descriptorCount = _DVR_MAX_IMGUI_DESCRIPTOR_SETS,
+    },
+    {
+        .type = VK_DESCRIPTOR_TYPE_STORAGE_TEXEL_BUFFER,
+        .descriptorCount = _DVR_MAX_IMGUI_DESCRIPTOR_SETS,
+    },
+    {
+        .type = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER,
+        .descriptorCount = _DVR_MAX_IMGUI_DESCRIPTOR_SETS,
+    },
+    {
+        .type = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
+        .descriptorCount = _DVR_MAX_IMGUI_DESCRIPTOR_SETS,
+    },
+    {
+        .type = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER_DYNAMIC,
+        .descriptorCount = _DVR_MAX_IMGUI_DESCRIPTOR_SETS,
+    },
+    {
+        .type = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER_DYNAMIC,
+        .descriptorCount = _DVR_MAX_IMGUI_DESCRIPTOR_SETS,
+    },
+    {
+        .type = VK_DESCRIPTOR_TYPE_INPUT_ATTACHMENT,
+        .descriptorCount = _DVR_MAX_IMGUI_DESCRIPTOR_SETS,
+    },
+};
+
+DVR_RESULT(dvr_none) dvr_imgui_setup(void) {
+    igCreateContext(NULL);
+    ImGuiIO* io = igGetIO();
+    (void)io;
+
+    ImGui_ImplGlfw_InitForVulkan(g_dvr_state.window.window, true);
+
+    VkResult err;
+
+    // create pool for imgui
+    VkDescriptorPoolCreateInfo pool_info = {
+        .sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO,
+        .flags = VK_DESCRIPTOR_POOL_CREATE_FREE_DESCRIPTOR_SET_BIT,
+        .maxSets = _DVR_MAX_IMGUI_DESCRIPTOR_SETS,
+        .poolSizeCount = sizeof(k_imgui_pool_sizes) / sizeof(k_imgui_pool_sizes[0]),
+        .pPoolSizes = k_imgui_pool_sizes,
+    };
+
+    err = vkCreateDescriptorPool(DVR_DEVICE, &pool_info, NULL, &g_dvr_state.imgui.pool);
+    if (err != VK_SUCCESS) {
+        return DVR_ERROR(dvr_none, "failed to create imgui descriptor pool");
+    }
+
+    VkRenderPass swapchain_render_pass =
+        dvr_get_render_pass_data(g_dvr_state.defaults.swapchain_render_pass)->vk.render_pass;
+
+    ImGui_ImplVulkan_InitInfo init_info = {
+        .Instance = g_dvr_state.vk.instance,
+        .PhysicalDevice = g_dvr_state.vk.physical_device,
+        .Device = DVR_DEVICE,
+        .QueueFamily = find_queue_families(g_dvr_state.vk.physical_device).graphics_family,
+        .Queue = g_dvr_state.vk.graphics_queue,
+        .PipelineCache = VK_NULL_HANDLE,
+        .DescriptorPool = g_dvr_state.imgui.pool,
+        .MinImageCount = 2,
+        .ImageCount = (u32)arrlenu(g_dvr_state.vk.swapchain_images),
+        .MSAASamples = g_dvr_state.vk.max_msaa_samples,
+        .RenderPass = swapchain_render_pass,
+        .Subpass = 0,
+    };
+
+    if (!ImGui_ImplVulkan_Init(&init_info)) {
+        return DVR_ERROR(dvr_none, "failed to initialize imgui");
+    }
+
+    return DVR_OK(dvr_none, DVR_NONE);
+}
+
+void dvr_imgui_shutdown(void) {
+    ImGui_ImplVulkan_Shutdown();
+    vkDestroyDescriptorPool(DVR_DEVICE, g_dvr_state.imgui.pool, NULL);
+    ImGui_ImplGlfw_Shutdown();
+    igDestroyContext(NULL);
+}
+
+void dvr_imgui_begin_frame(void) {
+    ImGui_ImplVulkan_NewFrame();
+    ImGui_ImplGlfw_NewFrame();
+    igNewFrame();
+}
+
+void dvr_imgui_render(void) {
+    igRender();
+    ImDrawData* draw_data = igGetDrawData();
+    ImGui_ImplVulkan_RenderDrawData(draw_data, g_dvr_state.vk.command_buffer, VK_NULL_HANDLE);
+}
+
+#endif

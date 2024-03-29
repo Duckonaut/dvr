@@ -12,6 +12,9 @@
 #include <assimp/defs.h>
 #include <assimp/postprocess.h>
 
+#define CIMGUI_DEFINE_ENUMS_AND_STRUCTS
+#include <cimgui.h>
+
 #include <stdint.h>
 #include <signal.h>
 #include <string.h>
@@ -75,6 +78,7 @@ static void set_executable_directory(const char* path) {
 static DVR_RESULT(dvr_none) app_setup();
 static void app_update();
 static void app_draw();
+static void app_draw_imgui();
 static void app_shutdown();
 
 int main(void) {
@@ -93,12 +97,18 @@ int main(void) {
     });
     DVR_EXIT_ON_ERROR(result);
 
+    result = dvr_imgui_setup();
+    DVR_EXIT_ON_ERROR(result);
+
     result = app_setup();
     DVR_EXIT_ON_ERROR(result);
 
     while (!dvr_should_close()) {
         dvr_poll_events();
         app_update();
+
+        app_draw_imgui();
+
         result = dvr_begin_frame();
         DVR_EXIT_ON_ERROR(result);
 
@@ -110,12 +120,16 @@ int main(void) {
 
     app_shutdown();
 
+    dvr_imgui_shutdown();
+
     dvr_shutdown();
 
     return 0;
 }
 
 // APP CODE
+
+#define FRAMETIME_SAMPLES 2000
 
 typedef struct app_state {
     dvr_image texture;
@@ -134,7 +148,10 @@ typedef struct app_state {
     f64 start_time;
     f64 total_time;
     f64 delta_time;
-    u32 second_frame_count;
+
+    f64 frame_times[FRAMETIME_SAMPLES];
+    u32 frame_time_index;
+    u32 frame_count;
 } app_state;
 
 static app_state g_app_state;
@@ -179,7 +196,7 @@ typedef struct app_view_uniform {
 } app_view_uniform;
 
 static DVR_RESULT(dvr_none) app_setup(void) {
-    DVR_RESULT(dvr_range) texture_data_res = dvr_read_file("texture.png");
+    DVR_RESULT(dvr_range) texture_data_res = dvr_read_file("viking_room.png");
     DVR_BUBBLE_INTO(dvr_none, texture_data_res);
 
     dvr_range texture_data_range = DVR_UNWRAP(texture_data_res);
@@ -487,25 +504,23 @@ static DVR_RESULT(dvr_none) app_setup(void) {
     g_app_state.start_time = (f64)start_time.tv_sec + (f64)start_time.tv_nsec / 1.0e9;
     g_app_state.total_time = 0.0;
     g_app_state.delta_time = 0.0;
+    g_app_state.frame_time_index = 0;
+    g_app_state.frame_count = 0;
 
     return DVR_OK(dvr_none, DVR_NONE);
 }
 
 static void app_update(void) {
-    g_app_state.second_frame_count++;
     struct timespec current_time;
     clock_gettime(CLOCK_MONOTONIC, &current_time);
 
-    f64 last_total_time = g_app_state.total_time;
-
     f64 current_time_s = (f64)current_time.tv_sec + (f64)current_time.tv_nsec / 1.0e9;
-    g_app_state.delta_time = current_time_s - g_app_state.total_time;
+    g_app_state.delta_time = current_time_s - g_app_state.total_time - g_app_state.start_time;
     g_app_state.total_time = current_time_s - g_app_state.start_time;
 
-    if ((u32)last_total_time != (u32)g_app_state.total_time) {
-        DVRLOG_INFO("Frames: %u", g_app_state.second_frame_count);
-        g_app_state.second_frame_count = 0;
-    }
+    g_app_state.frame_times[g_app_state.frame_time_index] = g_app_state.delta_time;
+    g_app_state.frame_time_index = (g_app_state.frame_time_index + 1) % FRAMETIME_SAMPLES;
+    g_app_state.frame_count++;
 }
 
 static void app_draw(void) {
@@ -541,7 +556,29 @@ static void app_draw(void) {
 
     vkCmdDrawIndexed(dvr_command_buffer(), g_app_state.index_count, 1, 0, 0, 0);
 
+    dvr_imgui_render();
+
     dvr_end_render_pass();
+}
+
+static void app_draw_imgui(void) {
+    dvr_imgui_begin_frame();
+
+    f64 avg_frametime = 0.0;
+    for (u32 i = 0; i < (g_app_state.frame_count < FRAMETIME_SAMPLES ? g_app_state.frame_count
+                                                                     : FRAMETIME_SAMPLES);
+         i++) {
+        avg_frametime += g_app_state.frame_times[i];
+    }
+    avg_frametime /= (f64)(g_app_state.frame_count < FRAMETIME_SAMPLES ? g_app_state.frame_count
+                                                                      : FRAMETIME_SAMPLES);
+
+    igBegin(APP_WINDOW_NAME, NULL, 0);
+
+    igText("Frame Time: %.3f ms (avg %d samples)", avg_frametime * 1000.0f, FRAMETIME_SAMPLES);
+    igText("FPS: %.1f", 1.0f / avg_frametime);
+
+    igEnd();
 }
 
 static void app_shutdown(void) {

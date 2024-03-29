@@ -12,7 +12,10 @@ cc = meson.get_compiler('c')
 
 static_link_libs = false
 add_project_arguments('-DIMGUI_DISABLE_OBSOLETE_FUNCTIONS=1', language : 'cpp')
-imgui_backends = []
+imgui_backends = [
+  'imgui/backends/imgui_impl_glfw.cpp',
+  'imgui/backends/imgui_impl_vulkan.cpp',
+]
 backend_deps = []
 if host_machine.system() == 'windows'
   add_project_arguments('-DIMGUI_IMPL_API=extern"C" __declspec(dllexport)', language : 'cpp')

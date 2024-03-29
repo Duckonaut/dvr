@@ -1,0 +1,1 @@
+option('imgui', type : 'boolean', value : false, description : 'Enable ImGui')

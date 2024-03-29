@@ -42,12 +42,6 @@ elif host_machine.system() == 'linux'
   add_project_arguments('-D_POSIX_C_SOURCE=200809L', language : 'c')
 
   platform_deps += cc.find_library('m', required : true)
-  platform_deps += cc.find_library('pthread', required : true)
-  platform_deps += cc.find_library('Xi', required : true)
-  platform_deps += cc.find_library('Xcursor', required : true)
-  platform_deps += dependency('X11', required : true)
-  platform_deps += dependency('GL', required : true)
-  platform_deps += dependency('dl', required : true)
 elif host_machine.system() == 'emscripten-webgl' or host_machine.system() == 'emscripten-webgpu'
   exe_name += '.html'
   add_project_link_arguments(
@@ -80,9 +74,13 @@ else
   buildtype_files = [
     'src/debug.c',
   ]
+endif
+
+if get_option('imgui')
   buildtype_deps = [
-    dependency('cimgui', required : true, static : static_link_libs),
+    subproject('cimgui', default_options : ['default_library=static']).get_variable('cimgui_dep'),
   ]
+  add_project_arguments('-DDVR_ENABLE_IMGUI', language : 'c')
 endif
 
 # shaders

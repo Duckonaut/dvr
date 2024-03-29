@@ -14,19 +14,19 @@ clean:
 
 [unix]
 setup:
-    meson setup build
+    meson setup build -Dimgui=true
 
 [unix]
 resetup:
-    meson setup build --wipe
+    meson setup build --wipe -Dimgui=true
 
 [windows]
 setup:
-    meson setup build --backend vs
+    meson setup build --backend vs -Dimgui=true
 
 [windows]
 resetup:
-    meson setup build --backend vs --wipe
+    meson setup build --backend vs --wipe -Dimgui=true
 
 build: setup
     meson compile -C build
