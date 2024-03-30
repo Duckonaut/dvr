@@ -108,6 +108,8 @@ typedef struct dvr_state {
         VkImageView* swapchain_image_views;
         VkFormat swapchain_format;
         VkExtent2D swapchain_extent;
+        u32 swapchain_image_count;
+        VkPresentModeKHR present_mode;
         VkDescriptorPool descriptor_pool;
         VkCommandPool command_pool;
         VkCommandBuffer command_buffer;
@@ -2133,31 +2135,24 @@ static VkSampleCountFlagBits _dvr_vk_get_max_usable_sample_count() {
                                 properties.limits.framebufferDepthSampleCounts;
 
     if (counts & VK_SAMPLE_COUNT_64_BIT) {
-        DVRLOG_INFO("max msaa samples: 64");
         return VK_SAMPLE_COUNT_64_BIT;
     }
     if (counts & VK_SAMPLE_COUNT_32_BIT) {
-        DVRLOG_INFO("max msaa samples: 32");
         return VK_SAMPLE_COUNT_32_BIT;
     }
     if (counts & VK_SAMPLE_COUNT_16_BIT) {
-        DVRLOG_INFO("max msaa samples: 16");
         return VK_SAMPLE_COUNT_16_BIT;
     }
     if (counts & VK_SAMPLE_COUNT_8_BIT) {
-        DVRLOG_INFO("max msaa samples: 8");
         return VK_SAMPLE_COUNT_8_BIT;
     }
     if (counts & VK_SAMPLE_COUNT_4_BIT) {
-        DVRLOG_INFO("max msaa samples: 4");
         return VK_SAMPLE_COUNT_4_BIT;
     }
     if (counts & VK_SAMPLE_COUNT_2_BIT) {
-        DVRLOG_INFO("max msaa samples: 2");
         return VK_SAMPLE_COUNT_2_BIT;
     }
     if (counts & VK_SAMPLE_COUNT_1_BIT) {
-        DVRLOG_INFO("max msaa samples: 1");
         return VK_SAMPLE_COUNT_1_BIT;
     }
 
@@ -2270,15 +2265,11 @@ static DVR_RESULT(dvr_none) dvr_vk_create_swapchain(void) {
 
     VkSurfaceFormatKHR surface_format =
         choose_swapchain_format(swapchain_support.formats, arrlenu(swapchain_support.formats));
-    DVRLOG_DEBUG("surface format: %d", surface_format.format);
-    DVRLOG_DEBUG("color space: %d", surface_format.colorSpace);
     VkPresentModeKHR present_mode = choose_present_mode(
         swapchain_support.present_modes,
         arrlenu(swapchain_support.formats)
     );
-    DVRLOG_DEBUG("present mode: %d", present_mode);
     VkExtent2D extent = choose_swap_extent(swapchain_support.capabilities);
-    DVRLOG_DEBUG("extent: %d x %d", extent.width, extent.height);
 
     arrfree(swapchain_support.formats);
     arrfree(swapchain_support.present_modes);
@@ -2288,8 +2279,6 @@ static DVR_RESULT(dvr_none) dvr_vk_create_swapchain(void) {
         swapchain_support.capabilities.maxImageCount < image_count) {
         image_count = swapchain_support.capabilities.maxImageCount;
     }
-
-    DVRLOG_DEBUG("image count: %d", image_count);
 
     VkSwapchainCreateInfoKHR create_info = {
         .sType = VK_STRUCTURE_TYPE_SWAPCHAIN_CREATE_INFO_KHR,
@@ -2335,6 +2324,8 @@ static DVR_RESULT(dvr_none) dvr_vk_create_swapchain(void) {
 
     g_dvr_state.vk.swapchain_format = surface_format.format;
     g_dvr_state.vk.swapchain_extent = extent;
+    g_dvr_state.vk.swapchain_image_count = image_count;
+    g_dvr_state.vk.present_mode = present_mode;
 
     return DVR_OK(dvr_none, DVR_NONE);
 }
@@ -2998,7 +2989,7 @@ static const VkDescriptorPoolSize k_imgui_pool_sizes[] = {
 DVR_RESULT(dvr_none) dvr_imgui_setup(void) {
     igCreateContext(NULL);
     ImGuiIO* io = igGetIO();
-    (void)io;
+    io->ConfigFlags |= ImGuiConfigFlags_DockingEnable;
 
     ImGui_ImplGlfw_InitForVulkan(g_dvr_state.window.window, true);
 
@@ -3091,6 +3082,75 @@ void dvr_imgui_info(void) {
         i32 width, height;
         glfwGetFramebufferSize(g_dvr_state.window.window, &width, &height);
         igText("window size: %d x %d", width, height);
+        i32 platform = glfwGetPlatform();
+        const char* platform_str = "unknown";
+        switch (platform) {
+            case GLFW_PLATFORM_WAYLAND:
+                platform_str = "wayland";
+                break;
+            case GLFW_PLATFORM_X11:
+                platform_str = "x11";
+                break;
+            case GLFW_PLATFORM_WIN32:
+                platform_str = "win32";
+                break;
+            case GLFW_PLATFORM_COCOA:
+                platform_str = "cocoa";
+                break;
+        }
+        igText("platform: %s", platform_str);
+        VkFormat format = dvr_swapchain_format();
+        const char* format_str = "unknown";
+        switch (format) {
+            case VK_FORMAT_R8G8B8A8_UNORM:
+                format_str = "R8G8B8A8_UNORM";
+                break;
+            case VK_FORMAT_B8G8R8A8_UNORM:
+                format_str = "B8G8R8A8_UNORM";
+                break;
+            case VK_FORMAT_R8G8B8A8_SRGB:
+                format_str = "R8G8B8A8_SRGB";
+                break;
+            case VK_FORMAT_B8G8R8A8_SRGB:
+                format_str = "B8G8R8A8_SRGB";
+                break;
+            case VK_FORMAT_R8G8B8_UNORM:
+                format_str = "R8G8B8_UNORM";
+                break;
+            case VK_FORMAT_B8G8R8_UNORM:
+                format_str = "B8G8R8_UNORM";
+                break;
+            case VK_FORMAT_R8G8B8_SRGB:
+                format_str = "R8G8B8_SRGB";
+                break;
+            case VK_FORMAT_B8G8R8_SRGB:
+                format_str = "B8G8R8_SRGB";
+                break;
+            default:
+                break;
+        }
+        igText("swapchain format: %s", format_str);
+        VkPresentModeKHR present_mode = g_dvr_state.vk.present_mode;
+        const char* present_mode_str = "unknown";
+        switch (present_mode) {
+            case VK_PRESENT_MODE_IMMEDIATE_KHR:
+                present_mode_str = "immediate";
+                break;
+            case VK_PRESENT_MODE_MAILBOX_KHR:
+                present_mode_str = "mailbox";
+                break;
+            case VK_PRESENT_MODE_FIFO_KHR:
+                present_mode_str = "fifo";
+                break;
+            case VK_PRESENT_MODE_FIFO_RELAXED_KHR:
+                present_mode_str = "fifo_relaxed";
+                break;
+            default:
+                break;
+        }
+        igText("present mode: %s", present_mode_str);
+        igText("swapchain image count: %d", g_dvr_state.vk.swapchain_image_count);
+
         igUnindent(16.0f);
     }
 
