@@ -9,6 +9,14 @@
 #define DVR_ABORT exit(1)
 #endif
 
+// [[nodiscard]] is a C23 feature, not supported by all compilers
+// Hide it behind a macro and enable it only for compilers that support it
+#if defined(__clang__) || defined(__GNUC__)
+#define DVR_NODISCARD [[nodiscard]]
+#else
+#define DVR_NODISCARD
+#endif
+
 typedef struct {
     const char* message;
     const char* file;
@@ -17,7 +25,7 @@ typedef struct {
 } dvr_error_t;
 
 #define DVR_RESULT_DEF(ok_type)                                                                \
-    typedef struct [[nodiscard]] dvr_result_##ok_type {                                        \
+    typedef struct DVR_NODISCARD dvr_result_##ok_type {                                        \
         union {                                                                                \
             ok_type ok;                                                                        \
             dvr_error_t error;                                                                 \
@@ -47,12 +55,11 @@ typedef struct {
 /// Only works if the ok type of the result is same as the ok type of the result
 /// of the enclosing function.
 ///
-/// Safe to call with the parameter generating side effects (i.e. function call)
+/// NOT Safe to call with the parameter generating side effects (i.e. function call)
 #define DVR_BUBBLE(result)                                                                     \
     {                                                                                          \
-        typeof(result) result_ = result;                                                       \
-        if (!result_.is_ok) {                                                                  \
-            return result_;                                                                    \
+        if (!result.is_ok) {                                                                  \
+            return result;                                                                    \
         }                                                                                      \
     }
 
@@ -60,26 +67,11 @@ typedef struct {
 ///
 /// Pass in the ok type of the enclosing function to convert the error correctly.
 ///
-/// Safe to call with the parameter generating side effects (i.e. function call)
+/// NOT Safe to call with the parameter generating side effects (i.e. function call)
 #define DVR_BUBBLE_INTO(scope_type, result)                                                    \
     {                                                                                          \
-        typeof(result) result_ = result;                                                       \
-        if (!result_.is_ok) {                                                                  \
-            return DVR_ERROR(scope_type, result_.error.message);                               \
-        }                                                                                      \
-    }
-
-/// Try to do an operation on a result. The ok value of the result is passed as `value`.
-///
-/// Safe to call with the parameter generating side effects (i.e. function call)
-#define DVR_TRY_DO(result, if_ok)                                                              \
-    {                                                                                          \
-        typeof(result) result_ = result;                                                       \
-        if (result_.is_ok) {                                                                   \
-            typeof(result_.ok) value = result_.ok;                                             \
-            if_ok;                                                                             \
-        } else {                                                                               \
-            return result_;                                                                    \
+        if (!result.is_ok) {                                                                   \
+            return DVR_ERROR(scope_type, result.error.message);                                \
         }                                                                                      \
     }
 
