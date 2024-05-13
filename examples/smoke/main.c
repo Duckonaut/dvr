@@ -21,18 +21,10 @@
 #define APP_WINDOW_WIDTH 1920
 #define APP_WINDOW_HEIGHT 1080
 #ifdef RELEASE
-#define APP_WINDOW_NAME "mold"
+#define APP_WINDOW_NAME "smoke"
 #else
-#define APP_WINDOW_NAME "dev: mold"
+#define APP_WINDOW_NAME "dev: smoke"
 #endif
-
-static inline f32 randf(void) {
-    return (f32)rand() / (f32)RAND_MAX;
-}
-
-static inline f32 randfr(f32 min, f32 max) {
-    return min + (max - min) * randf();
-}
 
 void term_handler(int signum) {
     (void)signum;
@@ -83,7 +75,6 @@ static void app_draw_imgui();
 static void app_shutdown();
 
 int main(void) {
-    srand((u32)time(NULL));
     signal(SIGTERM, term_handler);
     signal(SIGINT, term_handler);
 
@@ -142,17 +133,17 @@ int main(void) {
 #define FRAMETIME_SAMPLES 2000
 
 typedef struct app_state {
-    dvr_image compute_targets[2];
-
-    dvr_buffer particle_buffers[2];
+    dvr_image smoke_images[2];
 
     dvr_sampler sampler;
 
     dvr_descriptor_set_layout compute_descriptor_set_layout;
     dvr_descriptor_set compute_descriptor_sets[2];
 
-    dvr_compute_pipeline particle_update_pipeline;
-    dvr_compute_pipeline diffuse_pipeline;
+    dvr_compute_pipeline smoke_source_pipeline;
+    dvr_compute_pipeline smoke_diffuse_pipeline;
+    dvr_compute_pipeline smoke_advect_pipeline;
+    dvr_compute_pipeline smoke_velocity_pipeline;
 
     dvr_descriptor_set_layout descriptor_set_layout;
     dvr_descriptor_set descriptor_sets[2];
@@ -166,15 +157,6 @@ typedef struct app_state {
     u32 frame_time_index;
     u32 frame_count;
 
-    f32 blur_strength;
-    f32 decay;
-
-    f32 speed;
-    f32 turn_speed;
-    f32 random_steer;
-    f32 sensor_angle;
-    f32 sensor_distance;
-
     f32 hue;
 } app_state;
 
@@ -186,45 +168,69 @@ typedef struct particle {
     float _padding; // std140 padding
 } particle;
 
-typedef struct diffuse_push_constants {
+typedef struct smoke_push_constants {
     f32 delta_time;
-    f32 blur_strength;
-    f32 decay;
-} diffuse_push_constants;
-
-typedef struct particle_push_constants {
-    f32 world_size[2];
-    u32 num_particles;
-    f32 delta_time;
-    f32 speed;
-    f32 turn_speed;
-    f32 random_steer;
-    f32 sensor_angle;
-    f32 sensor_distance;
-} particle_push_constants;
+    f32 diffuse_strength;
+    vec2 emitter_position;
+    f32 emitter_radius;
+    f32 _padding2;
+} smoke_push_constants;
 
 typedef struct render_push_constants {
     f32 hue;
 } render_push_constants;
 
-#define NUM_PARTICLES 0x100000
+static DVR_RESULT(dvr_compute_pipeline) build_pipeline(const char* file) {
+    DVR_RESULT(dvr_range) compute_spv_res = dvr_read_file(file);
+    DVR_BUBBLE_INTO(dvr_compute_pipeline, compute_spv_res);
+
+    dvr_range compute_spv = DVR_UNWRAP(compute_spv_res);
+
+    DVR_RESULT(dvr_shader_module)
+    compute_shader_res = dvr_create_shader_module(&(dvr_shader_module_desc){
+        .code = compute_spv,
+    });
+    dvr_free_file(compute_spv);
+    DVR_BUBBLE_INTO(dvr_compute_pipeline, compute_shader_res);
+
+    dvr_shader_module smoke_shader = DVR_UNWRAP(compute_shader_res);
+
+    DVR_RESULT(dvr_compute_pipeline)
+    comp_pipeline_res = dvr_create_compute_pipeline(&(dvr_compute_pipeline_desc){
+        .shader_module = smoke_shader,
+        .entry_point = "main",
+        .num_desc_set_layouts = 1,
+        .desc_set_layouts = &g_app_state.compute_descriptor_set_layout,
+        .num_push_constant_ranges = 1,
+        .push_constant_ranges =
+            (VkPushConstantRange[]){
+                (VkPushConstantRange){
+                    .stageFlags = VK_SHADER_STAGE_COMPUTE_BIT,
+                    .offset = 0,
+                    .size = sizeof(smoke_push_constants),
+                },
+            },
+    });
+
+    dvr_destroy_shader_module(smoke_shader);
+
+    return comp_pipeline_res;
+}
 
 static DVR_RESULT(dvr_none) app_setup(void) {
-    g_app_state.decay = 0.001f;
-    g_app_state.blur_strength = 0.01f;
     for (u8 i = 0; i < 2; i++) {
         DVR_RESULT(dvr_image)
         texture_res = dvr_create_image(&(dvr_image_desc){
             .usage = VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_STORAGE_BIT,
             .width = APP_WINDOW_WIDTH,
             .height = APP_WINDOW_HEIGHT,
-            .format = VK_FORMAT_R32_SFLOAT,
+            .format = VK_FORMAT_R8G8B8A8_UNORM,
             .tiling = VK_IMAGE_TILING_OPTIMAL,
             .properties = VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT,
         });
 
         DVR_BUBBLE_INTO(dvr_none, texture_res);
-        g_app_state.compute_targets[i] = DVR_UNWRAP(texture_res);
+        g_app_state.smoke_images[i] = DVR_UNWRAP(texture_res);
     }
 
     DVR_RESULT(dvr_sampler)
@@ -248,66 +254,20 @@ static DVR_RESULT(dvr_none) app_setup(void) {
     DVR_BUBBLE_INTO(dvr_none, sampler_res);
     g_app_state.sampler = DVR_UNWRAP(sampler_res);
 
-    particle* particle_data = malloc(sizeof(particle) * NUM_PARTICLES);
-
-    vec2 center = { APP_WINDOW_WIDTH / 2.0f, APP_WINDOW_HEIGHT / 2.0f };
-    for (u32 i = 0; i < NUM_PARTICLES; i++) {
-        particle_data[i].angle = randfr(0.0f, 6.28f);
-        f32 radius = randfr(0.0f, 100.0f);
-        particle_data[i].position[0] = center[0] + cosf(particle_data[i].angle) * radius;
-        particle_data[i].position[1] = center[1] + sinf(particle_data[i].angle) * radius;
-    }
-
-    DVR_RESULT(dvr_buffer)
-    storage_buffer_res = dvr_create_buffer(&(dvr_buffer_desc){
-        .usage = DVR_BUFFER_USAGE_STORAGE | DVR_BUFFER_USAGE_TRANSFER_DST,
-        .data =
-            (dvr_range){
-                .base = particle_data,
-                .size = sizeof(particle) * NUM_PARTICLES,
-            },
-        .lifecycle = DVR_BUFFER_LIFECYCLE_STATIC,
-    });
-    DVR_BUBBLE_INTO(dvr_none, storage_buffer_res);
-    g_app_state.particle_buffers[0] = DVR_UNWRAP(storage_buffer_res);
-
-    free(particle_data);
-
-    DVR_RESULT(dvr_buffer)
-    storage_buffer_res_2 = dvr_create_buffer(&(dvr_buffer_desc){
-        .usage = DVR_BUFFER_USAGE_STORAGE | DVR_BUFFER_USAGE_TRANSFER_DST,
-        .data = (dvr_range){ .size = sizeof(particle) * NUM_PARTICLES },
-        .lifecycle = DVR_BUFFER_LIFECYCLE_STATIC,
-    });
-    DVR_BUBBLE_INTO(dvr_none, storage_buffer_res_2);
-    g_app_state.particle_buffers[1] = DVR_UNWRAP(storage_buffer_res_2);
-
     DVR_RESULT(dvr_descriptor_set_layout)
     descriptor_set_layout_res =
         dvr_create_descriptor_set_layout(&(dvr_descriptor_set_layout_desc){
-            .num_bindings = 4,
+            .num_bindings = 2,
             .bindings =
                 (dvr_descriptor_set_layout_binding_desc[]){
                     (dvr_descriptor_set_layout_binding_desc){
                         .binding = 0,
-                        .type = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
-                        .stage_flags = VK_SHADER_STAGE_COMPUTE_BIT,
-                        .count = 1,
-                    },
-                    (dvr_descriptor_set_layout_binding_desc){
-                        .binding = 1,
-                        .type = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
-                        .stage_flags = VK_SHADER_STAGE_COMPUTE_BIT,
-                        .count = 1,
-                    },
-                    (dvr_descriptor_set_layout_binding_desc){
-                        .binding = 2,
                         .type = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE,
                         .stage_flags = VK_SHADER_STAGE_COMPUTE_BIT,
                         .count = 1,
                     },
                     (dvr_descriptor_set_layout_binding_desc){
-                        .binding = 3,
+                        .binding = 1,
                         .type = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE,
                         .stage_flags = VK_SHADER_STAGE_COMPUTE_BIT,
                         .count = 1,
@@ -320,40 +280,22 @@ static DVR_RESULT(dvr_none) app_setup(void) {
     DVR_RESULT(dvr_descriptor_set)
     descriptor_set_res = dvr_create_descriptor_set(&(dvr_descriptor_set_desc){
         .layout = g_app_state.compute_descriptor_set_layout,
-        .num_bindings = 4,
+        .num_bindings = 2,
         .bindings =
             (dvr_descriptor_set_binding_desc[]){
                 (dvr_descriptor_set_binding_desc){
                     .binding = 0,
-                    .type = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
-                    .buffer = {
-                        .buffer = g_app_state.particle_buffers[0],
-                        .offset = 0,
-                        .size = sizeof(particle) * NUM_PARTICLES,
-                    },
-                },
-                (dvr_descriptor_set_binding_desc){
-                    .binding = 1,
-                    .type = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
-                    .buffer = {
-                        .buffer = g_app_state.particle_buffers[1],
-                        .offset = 0,
-                        .size = sizeof(particle) * NUM_PARTICLES,
-                    },
-                },
-                (dvr_descriptor_set_binding_desc){
-                    .binding = 2,
                     .type = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE,
                     .image = {
-                        .image = g_app_state.compute_targets[0],
+                        .image = g_app_state.smoke_images[0],
                         .sampler = g_app_state.sampler,
                     },
                 },
                 (dvr_descriptor_set_binding_desc){
-                    .binding = 3,
+                    .binding = 1,
                     .type = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE,
                     .image = {
-                        .image = g_app_state.compute_targets[1],
+                        .image = g_app_state.smoke_images[1],
                         .sampler = g_app_state.sampler,
                     },
                 },
@@ -364,40 +306,22 @@ static DVR_RESULT(dvr_none) app_setup(void) {
 
     descriptor_set_res = dvr_create_descriptor_set(&(dvr_descriptor_set_desc){
         .layout = g_app_state.compute_descriptor_set_layout,
-        .num_bindings = 4,
+        .num_bindings = 2,
         .bindings =
             (dvr_descriptor_set_binding_desc[]){
                 (dvr_descriptor_set_binding_desc){
                     .binding = 0,
-                    .type = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
-                    .buffer = {
-                        .buffer = g_app_state.particle_buffers[1],
-                        .offset = 0,
-                        .size = sizeof(particle) * NUM_PARTICLES,
-                    },
-                },
-                (dvr_descriptor_set_binding_desc){
-                    .binding = 1,
-                    .type = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
-                    .buffer = {
-                        .buffer = g_app_state.particle_buffers[0],
-                        .offset = 0,
-                        .size = sizeof(particle) * NUM_PARTICLES,
-                    },
-                },
-                (dvr_descriptor_set_binding_desc){
-                    .binding = 2,
                     .type = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE,
                     .image = {
-                        .image = g_app_state.compute_targets[1],
+                        .image = g_app_state.smoke_images[1],
                         .sampler = g_app_state.sampler,
                     },
                 },
                 (dvr_descriptor_set_binding_desc){
-                    .binding = 3,
+                    .binding = 1,
                     .type = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE,
                     .image = {
-                        .image = g_app_state.compute_targets[0],
+                        .image = g_app_state.smoke_images[0],
                         .sampler = g_app_state.sampler,
                     },
                 },
@@ -406,81 +330,29 @@ static DVR_RESULT(dvr_none) app_setup(void) {
     DVR_BUBBLE_INTO(dvr_none, descriptor_set_res);
     g_app_state.compute_descriptor_sets[1] = DVR_UNWRAP(descriptor_set_res);
 
-    DVR_RESULT(dvr_range) compute_spv_res = dvr_read_file("mold_update_cs.spv");
-    DVR_BUBBLE_INTO(dvr_none, compute_spv_res);
-
-    dvr_range compute_spv = DVR_UNWRAP(compute_spv_res);
-
-    DVR_RESULT(dvr_shader_module)
-    compute_shader_res = dvr_create_shader_module(&(dvr_shader_module_desc){
-        .code = compute_spv,
-    });
-    dvr_free_file(compute_spv);
-    DVR_BUBBLE_INTO(dvr_none, compute_shader_res);
-
-    dvr_shader_module particle_update_shader = DVR_UNWRAP(compute_shader_res);
-
-    compute_spv_res = dvr_read_file("mold_diffuse_cs.spv");
-    DVR_BUBBLE_INTO(dvr_none, compute_spv_res);
-
-    compute_spv = DVR_UNWRAP(compute_spv_res);
-
-    compute_shader_res = dvr_create_shader_module(&(dvr_shader_module_desc){
-        .code = compute_spv,
-    });
-    dvr_free_file(compute_spv);
-    DVR_BUBBLE_INTO(dvr_none, compute_shader_res);
-
-    dvr_shader_module diffuse_shader = DVR_UNWRAP(compute_shader_res);
-
     DVR_RESULT(dvr_compute_pipeline)
-    comp_pipeline_res = dvr_create_compute_pipeline(&(dvr_compute_pipeline_desc){
-        .shader_module = particle_update_shader,
-        .entry_point = "main",
-        .num_desc_set_layouts = 1,
-        .desc_set_layouts = &g_app_state.compute_descriptor_set_layout,
-        .num_push_constant_ranges = 1,
-        .push_constant_ranges =
-            (VkPushConstantRange[]){
-                (VkPushConstantRange){
-                    .stageFlags = VK_SHADER_STAGE_COMPUTE_BIT,
-                    .offset = 0,
-                    .size = sizeof(particle_push_constants),
-                },
-            },
-    });
+    comp_pipeline_res = build_pipeline("smoke_source_cs.spv");
     DVR_BUBBLE_INTO(dvr_none, comp_pipeline_res);
+    g_app_state.smoke_source_pipeline = DVR_UNWRAP(comp_pipeline_res);
 
-    g_app_state.particle_update_pipeline = DVR_UNWRAP(comp_pipeline_res);
-
-    comp_pipeline_res = dvr_create_compute_pipeline(&(dvr_compute_pipeline_desc){
-        .shader_module = diffuse_shader,
-        .entry_point = "main",
-        .num_desc_set_layouts = 1,
-        .desc_set_layouts = &g_app_state.compute_descriptor_set_layout,
-        .num_push_constant_ranges = 1,
-        .push_constant_ranges =
-            (VkPushConstantRange[]){
-                (VkPushConstantRange){
-                    .stageFlags = VK_SHADER_STAGE_COMPUTE_BIT,
-                    .offset = 0,
-                    .size = sizeof(diffuse_push_constants),
-                },
-            },
-    });
+    comp_pipeline_res = build_pipeline("smoke_diffuse_cs.spv");
     DVR_BUBBLE_INTO(dvr_none, comp_pipeline_res);
+    g_app_state.smoke_diffuse_pipeline = DVR_UNWRAP(comp_pipeline_res);
 
-    g_app_state.diffuse_pipeline = DVR_UNWRAP(comp_pipeline_res);
+    comp_pipeline_res = build_pipeline("smoke_advect_cs.spv");
+    DVR_BUBBLE_INTO(dvr_none, comp_pipeline_res);
+    g_app_state.smoke_advect_pipeline = DVR_UNWRAP(comp_pipeline_res);
 
-    dvr_destroy_shader_module(particle_update_shader);
-    dvr_destroy_shader_module(diffuse_shader);
+    comp_pipeline_res = build_pipeline("smoke_velocity_cs.spv");
+    DVR_BUBBLE_INTO(dvr_none, comp_pipeline_res);
+    g_app_state.smoke_velocity_pipeline = DVR_UNWRAP(comp_pipeline_res);
 
     DVR_RESULT(dvr_range) vert_spv_res = dvr_read_file("rt_render_vs.spv");
     DVR_BUBBLE_INTO(dvr_none, vert_spv_res);
 
     dvr_range vert_spv = DVR_UNWRAP(vert_spv_res);
 
-    DVR_RESULT(dvr_range) frag_spv_res = dvr_read_file("mold_render_fs.spv");
+    DVR_RESULT(dvr_range) frag_spv_res = dvr_read_file("smoke_render_fs.spv");
     DVR_BUBBLE_INTO(dvr_none, frag_spv_res);
 
     dvr_range frag_spv = DVR_UNWRAP(frag_spv_res);
@@ -529,7 +401,7 @@ static DVR_RESULT(dvr_none) app_setup(void) {
                         .binding = 0,
                         .type = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
                         .image = {
-                            .image = g_app_state.compute_targets[i],
+                            .image = g_app_state.smoke_images[i],
                             .sampler = g_app_state.sampler,
                             .layout = VK_IMAGE_LAYOUT_GENERAL,
                         },
@@ -652,34 +524,8 @@ static void app_update(void) {
     g_app_state.frame_count++;
 }
 
-static void app_compute(void) {
-    dvr_bind_compute_pipeline(g_app_state.diffuse_pipeline);
-    dvr_bind_descriptor_set_compute(
-        g_app_state.diffuse_pipeline,
-        g_app_state.compute_descriptor_sets[(g_app_state.frame_count - 1) % 2]
-    );
-
-    dvr_push_constants_compute(
-        g_app_state.diffuse_pipeline,
-        0,
-        (dvr_range){
-            .base =
-                &(diffuse_push_constants){
-                    .delta_time = (f32)g_app_state.delta_time,
-                    .blur_strength = g_app_state.blur_strength,
-                    .decay = g_app_state.decay,
-                },
-            .size = sizeof(diffuse_push_constants),
-        }
-    );
-
-    dvr_dispatch_compute(
-        (u32)ceilf((f32)APP_WINDOW_WIDTH / 32.0f),
-        (u32)ceilf((f32)APP_WINDOW_HEIGHT / 32.0f),
-        1
-    );
-
-    VkMemoryBarrier memory_barrier = {
+static void barrier(void) {
+    VkMemoryBarrier barrier = {
         .sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER,
         .pNext = NULL,
         .srcAccessMask = VK_ACCESS_SHADER_WRITE_BIT,
@@ -692,73 +538,106 @@ static void app_compute(void) {
         VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
         0,
         1,
-        &memory_barrier,
+        &barrier,
         0,
         NULL,
         0,
         NULL
     );
+}
 
-    dvr_bind_compute_pipeline(g_app_state.particle_update_pipeline);
+static void app_compute(void) {
+    u32 wg_count_x = (u32)ceilf((f32)APP_WINDOW_WIDTH / 32.0f);
+    u32 wg_count_y = (u32)ceilf((f32)APP_WINDOW_HEIGHT / 32.0f);
+
+    vec2 mouse_pos = { 0.0f, 0.0f };
+    dvr_get_mouse_pos(&mouse_pos[0], &mouse_pos[1]);
+
+    u32 descriptor_set_index = g_app_state.frame_count % 2;
+
+    smoke_push_constants push_constants = {
+        .delta_time = (f32)g_app_state.delta_time,
+        .diffuse_strength = 40.0f,
+        .emitter_position = { mouse_pos[0], mouse_pos[1] },
+        .emitter_radius = 24.0f,
+    };
+
+    dvr_bind_compute_pipeline(g_app_state.smoke_source_pipeline);
     dvr_bind_descriptor_set_compute(
-        g_app_state.particle_update_pipeline,
-        g_app_state.compute_descriptor_sets[(g_app_state.frame_count - 1) % 2]
+        g_app_state.smoke_source_pipeline,
+        g_app_state.compute_descriptor_sets[descriptor_set_index]
     );
 
     dvr_push_constants_compute(
-        g_app_state.particle_update_pipeline,
+        g_app_state.smoke_source_pipeline,
         0,
         (dvr_range){
-            .base =
-                &(particle_push_constants){
-                    .world_size[0] = APP_WINDOW_WIDTH,
-                    .world_size[1] = APP_WINDOW_HEIGHT,
-                    .num_particles = NUM_PARTICLES,
-                    .delta_time = (f32)g_app_state.delta_time,
-                    .speed = g_app_state.speed,
-                    .turn_speed = g_app_state.turn_speed,
-                    .random_steer = g_app_state.random_steer,
-                    .sensor_angle = g_app_state.sensor_angle,
-                    .sensor_distance = g_app_state.sensor_distance,
-                },
-            .size = sizeof(particle_push_constants),
+            .base = &push_constants,
+            .size = sizeof(smoke_push_constants),
         }
     );
 
-    dvr_dispatch_compute(NUM_PARTICLES / 256, 1, 1);
-}
+    descriptor_set_index = (descriptor_set_index + 1) % 2;
+    dvr_dispatch_compute(wg_count_x, wg_count_y, 1);
 
-static void reset_particles(void) {
-    particle* particle_data = malloc(sizeof(particle) * NUM_PARTICLES);
+    barrier();
 
-    vec2 center = { APP_WINDOW_WIDTH / 2.0f, APP_WINDOW_HEIGHT / 2.0f };
+    dvr_bind_compute_pipeline(g_app_state.smoke_diffuse_pipeline);
+    dvr_push_constants_compute(
+        g_app_state.smoke_diffuse_pipeline,
+        0,
+        (dvr_range){
+            .base = &push_constants,
+            .size = sizeof(smoke_push_constants),
+        }
+    );
+    // for (u32 i = 0; i < 10; i++) {
+        dvr_bind_descriptor_set_compute(
+            g_app_state.smoke_diffuse_pipeline,
+            g_app_state.compute_descriptor_sets[descriptor_set_index]
+        );
 
-    for (u32 i = 0; i < NUM_PARTICLES; i++) {
-        particle_data[i].angle = randfr(0.0f, 6.28f);
-        f32 radius = randfr(0.0f, 100.0f);
-        particle_data[i].position[0] = center[0] + cosf(particle_data[i].angle) * radius;
-        particle_data[i].position[1] = center[1] + sinf(particle_data[i].angle) * radius;
-    }
+        descriptor_set_index = (descriptor_set_index + 1) % 2;
+        dvr_dispatch_compute(wg_count_x, wg_count_y, 1);
 
-    DVR_RESULT(dvr_buffer)
-    copy_src_res = dvr_create_buffer(&(dvr_buffer_desc){
-        .usage = DVR_BUFFER_USAGE_TRANSFER_SRC,
-        .data =
-            (dvr_range){
-                .base = particle_data,
-                .size = sizeof(particle) * NUM_PARTICLES,
-            },
-        .lifecycle = DVR_BUFFER_LIFECYCLE_STATIC,
-    });
-    DVR_EXIT_ON_ERROR(copy_src_res);
+        barrier();
+    // }
 
-    dvr_buffer copy_src = DVR_UNWRAP(copy_src_res);
+    dvr_bind_compute_pipeline(g_app_state.smoke_advect_pipeline);
+    dvr_push_constants_compute(
+        g_app_state.smoke_advect_pipeline,
+        0,
+        (dvr_range){
+            .base = &push_constants,
+            .size = sizeof(smoke_push_constants),
+        }
+    );
+    dvr_bind_descriptor_set_compute(
+        g_app_state.smoke_advect_pipeline,
+        g_app_state.compute_descriptor_sets[descriptor_set_index]
+    );
 
-    for (u8 i = 0; i < 2; i++) {
-        dvr_copy_buffer(copy_src, g_app_state.particle_buffers[i], 0, 0, sizeof(particle) * NUM_PARTICLES);
-    }
+    descriptor_set_index = (descriptor_set_index + 1) % 2;
+    dvr_dispatch_compute(wg_count_x, wg_count_y, 1);
 
-    dvr_destroy_buffer(copy_src);
+    barrier();
+
+    dvr_bind_compute_pipeline(g_app_state.smoke_velocity_pipeline);
+    dvr_push_constants_compute(
+        g_app_state.smoke_velocity_pipeline,
+        0,
+        (dvr_range){
+            .base = &push_constants,
+            .size = sizeof(smoke_push_constants),
+        }
+    );
+    dvr_bind_descriptor_set_compute(
+        g_app_state.smoke_velocity_pipeline,
+        g_app_state.compute_descriptor_sets[descriptor_set_index]
+    );
+
+    descriptor_set_index = (descriptor_set_index + 1) % 2;
+    dvr_dispatch_compute(wg_count_x, wg_count_y, 1);
 }
 
 static void app_draw(void) {
@@ -805,32 +684,10 @@ static void app_draw_imgui(void) {
     igText("Frame Time: %.3f ms (avg %d samples)", avg_frametime * 1000.0f, FRAMETIME_SAMPLES);
     igText("FPS: %.1f", 1.0f / avg_frametime);
 
-    if (igCollapsingHeader_TreeNodeFlags("particles", 0)) {
-        igSliderFloat("speed", &g_app_state.speed, 0.0f, 200.0f, "%.3f", 1.0f);
-        igSliderFloat("turn speed", &g_app_state.turn_speed, 0.0f, 200.0f, "%.3f", 1.0f);
-        igSliderFloat("random steer", &g_app_state.random_steer, 0.0f, 200.0f, "%.3f", 1.0f);
-        igSliderFloat("sensor angle", &g_app_state.sensor_angle, 0.0f, 6.28f, "%.3f", 1.0f);
-        igSliderFloat(
-            "sensor distance",
-            &g_app_state.sensor_distance,
-            0.0f,
-            100.0f,
-            "%.3f",
-            1.0f
-        );
-    }
-
-    if (igCollapsingHeader_TreeNodeFlags("diffuse", 0)) {
-        igSliderFloat("blur strength", &g_app_state.blur_strength, 0.0f, 0.25f, "%.3f", 1.0f);
-        igSliderFloat("decay", &g_app_state.decay, 0.0f, 0.025f, "%.4f", 1.0f);
-    }
+    if (igCollapsingHeader_TreeNodeFlags("smoke", 0)) {}
 
     if (igCollapsingHeader_TreeNodeFlags("render", 0)) {
         igSliderFloat("hue", &g_app_state.hue, 0.0f, 360.0f, "%.1f", 1.0f);
-    }
-
-    if (igButton("reset", (ImVec2){ 0, 0 })) {
-        reset_particles();
     }
 
     igEnd();
@@ -840,15 +697,16 @@ static void app_shutdown(void) {
     dvr_wait_idle();
 
     for (u8 i = 0; i < 2; i++) {
-        dvr_destroy_image(g_app_state.compute_targets[i]);
-        dvr_destroy_buffer(g_app_state.particle_buffers[i]);
+        dvr_destroy_image(g_app_state.smoke_images[i]);
         dvr_destroy_descriptor_set(g_app_state.compute_descriptor_sets[i]);
         dvr_destroy_descriptor_set(g_app_state.descriptor_sets[i]);
     }
     dvr_destroy_sampler(g_app_state.sampler);
     dvr_destroy_descriptor_set_layout(g_app_state.compute_descriptor_set_layout);
     dvr_destroy_descriptor_set_layout(g_app_state.descriptor_set_layout);
-    dvr_destroy_compute_pipeline(g_app_state.particle_update_pipeline);
-    dvr_destroy_compute_pipeline(g_app_state.diffuse_pipeline);
+    dvr_destroy_compute_pipeline(g_app_state.smoke_source_pipeline);
+    dvr_destroy_compute_pipeline(g_app_state.smoke_diffuse_pipeline);
+    dvr_destroy_compute_pipeline(g_app_state.smoke_advect_pipeline);
+    dvr_destroy_compute_pipeline(g_app_state.smoke_velocity_pipeline);
     dvr_destroy_pipeline(g_app_state.pipeline);
 }

@@ -43,8 +43,8 @@ release:
 
 [unix]
 run: build
-    ./build/examples/mold
+    ./build/examples/smoke
 
 [windows]
 run: build
-    ./build/dvr.exe
+    ./build/examples/smoke.exe

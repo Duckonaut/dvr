@@ -3332,6 +3332,13 @@ void dvr_get_window_size(u32* width, u32* height) {
     *height = (u32)h;
 }
 
+void dvr_get_mouse_pos(f32* x, f32* y) {
+    double xpos, ypos;
+    glfwGetCursorPos(g_dvr_state.window.window, &xpos, &ypos);
+    *x = (f32)xpos;
+    *y = (f32)ypos;
+}
+
 #ifdef DVR_ENABLE_IMGUI
 #define CIMGUI_DEFINE_ENUMS_AND_STRUCTS
 #include <cimgui.h>

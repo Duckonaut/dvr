@@ -358,6 +358,7 @@ void dvr_poll_events(void);
 void dvr_close(void);
 void dvr_wait_idle(void);
 void dvr_get_window_size(u32* width, u32* height);
+void dvr_get_mouse_pos(f32* x, f32* y);
 
 #ifdef DVR_ENABLE_IMGUI
 DVR_RESULT(dvr_none) dvr_imgui_setup();

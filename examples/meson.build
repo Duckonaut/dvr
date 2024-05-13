@@ -2,10 +2,15 @@
 shaders = [
   'default_vs',
   'default_fs',
-  'mold_render_vs',
+  'rt_render_vs',
   'mold_render_fs',
   'mold_update_cs',
   'mold_diffuse_cs',
+  'smoke_render_fs',
+  'smoke_source_cs',
+  'smoke_diffuse_cs',
+  'smoke_advect_cs',
+  'smoke_velocity_cs',
 ]
 
 shader_targets = []
@@ -63,6 +68,7 @@ cglm = subproject('cglm', default_options : ['default_library=static']).get_vari
 examples = [
   'model',
   'mold',
+  'smoke',
 ]
 
 example_deps = {
@@ -71,6 +77,9 @@ example_deps = {
     cglm,
   ],
   'mold' : [
+    cglm,
+  ],
+  'smoke' : [
     cglm,
   ],
 }
