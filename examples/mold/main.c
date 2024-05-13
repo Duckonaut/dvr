@@ -21,9 +21,9 @@
 #define APP_WINDOW_WIDTH 1920
 #define APP_WINDOW_HEIGHT 1080
 #ifdef RELEASE
-#define APP_WINDOW_NAME "compute"
+#define APP_WINDOW_NAME "mold"
 #else
-#define APP_WINDOW_NAME "dev: compute"
+#define APP_WINDOW_NAME "dev: mold"
 #endif
 
 static inline f32 randf(void) {
@@ -406,7 +406,7 @@ static DVR_RESULT(dvr_none) app_setup(void) {
     DVR_BUBBLE_INTO(dvr_none, descriptor_set_res);
     g_app_state.compute_descriptor_sets[1] = DVR_UNWRAP(descriptor_set_res);
 
-    DVR_RESULT(dvr_range) compute_spv_res = dvr_read_file("particle_update_cs.spv");
+    DVR_RESULT(dvr_range) compute_spv_res = dvr_read_file("mold_update_cs.spv");
     DVR_BUBBLE_INTO(dvr_none, compute_spv_res);
 
     dvr_range compute_spv = DVR_UNWRAP(compute_spv_res);
@@ -420,7 +420,7 @@ static DVR_RESULT(dvr_none) app_setup(void) {
 
     dvr_shader_module particle_update_shader = DVR_UNWRAP(compute_shader_res);
 
-    compute_spv_res = dvr_read_file("diffuse_cs.spv");
+    compute_spv_res = dvr_read_file("mold_diffuse_cs.spv");
     DVR_BUBBLE_INTO(dvr_none, compute_spv_res);
 
     compute_spv = DVR_UNWRAP(compute_spv_res);
@@ -475,12 +475,12 @@ static DVR_RESULT(dvr_none) app_setup(void) {
     dvr_destroy_shader_module(particle_update_shader);
     dvr_destroy_shader_module(diffuse_shader);
 
-    DVR_RESULT(dvr_range) vert_spv_res = dvr_read_file("rt_vs.spv");
+    DVR_RESULT(dvr_range) vert_spv_res = dvr_read_file("mold_render_vs.spv");
     DVR_BUBBLE_INTO(dvr_none, vert_spv_res);
 
     dvr_range vert_spv = DVR_UNWRAP(vert_spv_res);
 
-    DVR_RESULT(dvr_range) frag_spv_res = dvr_read_file("rt_fs.spv");
+    DVR_RESULT(dvr_range) frag_spv_res = dvr_read_file("mold_render_fs.spv");
     DVR_BUBBLE_INTO(dvr_none, frag_spv_res);
 
     dvr_range frag_spv = DVR_UNWRAP(frag_spv_res);

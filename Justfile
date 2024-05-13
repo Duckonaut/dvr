@@ -43,7 +43,7 @@ release:
 
 [unix]
 run: build
-    ./build/examples/compute
+    ./build/examples/mold
 
 [windows]
 run: build

@@ -2,10 +2,10 @@
 shaders = [
   'default_vs',
   'default_fs',
-  'rt_vs',
-  'rt_fs',
-  'particle_update_cs',
-  'diffuse_cs',
+  'mold_render_vs',
+  'mold_render_fs',
+  'mold_update_cs',
+  'mold_diffuse_cs',
 ]
 
 shader_targets = []
@@ -62,7 +62,7 @@ cglm = subproject('cglm', default_options : ['default_library=static']).get_vari
 
 examples = [
   'model',
-  'compute',
+  'mold',
 ]
 
 example_deps = {
@@ -70,7 +70,7 @@ example_deps = {
     assimp,
     cglm,
   ],
-  'compute' : [
+  'mold' : [
     cglm,
   ],
 }
