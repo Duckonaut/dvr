@@ -43,7 +43,7 @@ release:
 
 [unix]
 run: build
-    ./build/examples/example
+    ./build/examples/compute
 
 [windows]
 run: build

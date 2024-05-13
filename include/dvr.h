@@ -28,6 +28,7 @@ typedef enum dvr_buffer_usage {
     DVR_BUFFER_USAGE_UNIFORM = 1 << 2,
     DVR_BUFFER_USAGE_TRANSFER_SRC = 1 << 3,
     DVR_BUFFER_USAGE_TRANSFER_DST = 1 << 4,
+    DVR_BUFFER_USAGE_STORAGE = 1 << 5,
 } dvr_buffer_usage;
 
 typedef struct dvr_buffer_desc {
@@ -168,6 +169,7 @@ typedef struct dvr_descriptor_set_binding_desc {
         struct {
             dvr_image image;
             dvr_sampler sampler;
+            VkImageLayout layout;
         } image;
     };
 } dvr_descriptor_set_binding_desc;
@@ -188,6 +190,8 @@ void dvr_destroy_descriptor_set(dvr_descriptor_set desc_set);
 
 typedef struct dvr_pipeline dvr_pipeline;
 void dvr_bind_descriptor_set(dvr_pipeline pipeline, dvr_descriptor_set desc_set);
+typedef struct dvr_compute_pipeline dvr_compute_pipeline;
+void dvr_bind_descriptor_set_compute(dvr_compute_pipeline pipeline, dvr_descriptor_set desc_set);
 
 typedef struct dvr_shader_module_desc {
     dvr_range code;
@@ -304,6 +308,27 @@ DVR_RESULT_DEF(dvr_framebuffer);
 DVR_RESULT(dvr_framebuffer) dvr_create_framebuffer(dvr_framebuffer_desc* desc);
 void dvr_destroy_framebuffer(dvr_framebuffer framebuffer);
 
+typedef struct dvr_compute_pipeline {
+    u16 id;
+} dvr_compute_pipeline;
+DVR_RESULT_DEF(dvr_compute_pipeline);
+
+typedef struct dvr_compute_pipeline_desc {
+    dvr_shader_module shader_module;
+    const char* entry_point;
+    u32 num_desc_set_layouts;
+    dvr_descriptor_set_layout* desc_set_layouts;
+    u32 num_push_constant_ranges;
+    VkPushConstantRange* push_constant_ranges;
+} dvr_compute_pipeline_desc;
+
+DVR_RESULT(dvr_compute_pipeline) dvr_create_compute_pipeline(dvr_compute_pipeline_desc* desc);
+void dvr_destroy_compute_pipeline(dvr_compute_pipeline pipeline);
+
+void dvr_bind_compute_pipeline(dvr_compute_pipeline pipeline);
+void dvr_dispatch_compute(u32 group_count_x, u32 group_count_y, u32 group_count_z);
+void dvr_push_constants_compute(dvr_compute_pipeline pipeline, u32 offset, dvr_range data);
+
 DVR_RESULT(dvr_none) dvr_setup(dvr_setup_desc* desc);
 void dvr_shutdown();
 
@@ -313,11 +338,18 @@ dvr_framebuffer dvr_swapchain_framebuffer();
 dvr_render_pass dvr_swapchain_render_pass();
 void dvr_begin_swapchain_render_pass();
 
+VkDevice dvr_device();
 VkCommandBuffer dvr_command_buffer();
 #define DVR_COMMAND_BUFFER dvr_command_buffer()
 
+VkCommandBuffer dvr_compute_command_buffer();
+#define DVR_COMPUTE_COMMAND_BUFFER dvr_compute_command_buffer()
+
 DVR_RESULT(dvr_none) dvr_begin_frame();
 DVR_RESULT(dvr_none) dvr_end_frame();
+
+DVR_RESULT(dvr_none) dvr_begin_compute();
+DVR_RESULT(dvr_none) dvr_end_compute();
 
 bool dvr_should_close(void);
 void dvr_poll_events(void);

@@ -2,6 +2,10 @@
 shaders = [
   'default_vs',
   'default_fs',
+  'rt_vs',
+  'rt_fs',
+  'particle_update_cs',
+  'diffuse_cs',
 ]
 
 shader_targets = []
@@ -54,14 +58,30 @@ cmake_opt.set_override_option('warning_level', '0')
 assimp_subproject = cmake.subproject('assimp', options : cmake_opt)
 assimp = assimp_subproject.dependency('assimp')
 
-example_deps = [
-  subproject('cglm', default_options : ['default_library=static']).get_variable('cglm_dep'),
-  assimp,
-  dvr_dep,
+cglm = subproject('cglm', default_options : ['default_library=static']).get_variable('cglm_dep')
+
+examples = [
+  'model',
+  'compute',
 ]
 
-example_sources = [
-  'model/main.c',
-]
+example_deps = {
+  'model' : [
+    assimp,
+    cglm,
+  ],
+  'compute' : [
+    cglm,
+  ],
+}
 
-example = executable('example', example_sources, dependencies : example_deps)
+example_targets = []
+
+foreach example : examples
+  example_sources = [
+    join_paths(example, 'main.c'),
+  ]
+
+  example_target = executable(example, example_sources, dependencies : [ example_deps[example], dvr_dep ] )
+  example_targets += example_target
+endforeach
