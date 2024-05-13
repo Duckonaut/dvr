@@ -42,8 +42,8 @@ float sniff_area(vec2 pos, float angle, float dt, float sniff_angle, float sniff
     for (int i = -sniff_area_size; i <= sniff_area_size; i++) {
         for (int j = -sniff_area_size; j <= sniff_area_size; j++) {
             ivec2 pos_i = base_pos_i + ivec2(i, j);
-            pos_i.x = pos_i.x % push_constants.world_size.x;
-            pos_i.y = pos_i.y % push_constants.world_size.y;
+            pos_i.x = (pos_i.x + push_constants.world_size.x) % push_constants.world_size.x;
+            pos_i.y = (pos_i.y + push_constants.world_size.y) % push_constants.world_size.y;
             vec2 pos_f = vec2(pos_i);
 
             float val = imageLoad(in_img, pos_i).r;

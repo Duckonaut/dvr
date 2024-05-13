@@ -319,73 +319,115 @@ static void dvr_vk_copy_buffer(VkBuffer src, VkBuffer dst, VkDeviceSize size) {
 
 static DVR_RESULT(dvr_buffer) dvr_vk_create_static_buffer(dvr_buffer_desc* desc) {
     VkBufferUsageFlags usage = 0;
-    switch (desc->usage) {
-        case DVR_BUFFER_USAGE_VERTEX:
-            usage = VK_BUFFER_USAGE_VERTEX_BUFFER_BIT;
-            break;
-        case DVR_BUFFER_USAGE_INDEX:
-            usage = VK_BUFFER_USAGE_INDEX_BUFFER_BIT;
-            break;
-        case DVR_BUFFER_USAGE_UNIFORM:
-            usage = VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT;
-            break;
-        case DVR_BUFFER_USAGE_STORAGE:
-            usage = VK_BUFFER_USAGE_STORAGE_BUFFER_BIT;
-            break;
-        default:
-            return DVR_ERROR(dvr_buffer, "unknown buffer usage");
+    if (desc->usage & DVR_BUFFER_USAGE_VERTEX) {
+        usage |= VK_BUFFER_USAGE_VERTEX_BUFFER_BIT;
     }
+    if (desc->usage & DVR_BUFFER_USAGE_INDEX) {
+        usage |= VK_BUFFER_USAGE_INDEX_BUFFER_BIT;
+    }
+    if (desc->usage & DVR_BUFFER_USAGE_UNIFORM) {
+        usage |= VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT;
+    }
+    if (desc->usage & DVR_BUFFER_USAGE_STORAGE) {
+        usage |= VK_BUFFER_USAGE_STORAGE_BUFFER_BIT;
+    }
+    if (desc->usage & DVR_BUFFER_USAGE_TRANSFER_SRC) {
+        usage |= VK_BUFFER_USAGE_TRANSFER_SRC_BIT;
+    }
+    if (desc->usage & DVR_BUFFER_USAGE_TRANSFER_DST) {
+        usage |= VK_BUFFER_USAGE_TRANSFER_DST_BIT;
+    }
+
+    if (desc->usage == 0) {
+        return DVR_ERROR(dvr_buffer, "buffer usage must be specified");
+    }
+
     if (desc->data.base != NULL) {
-        VkBuffer src_buffer;
-        VkDeviceMemory src_memory;
+        if (usage == VK_BUFFER_USAGE_TRANSFER_SRC_BIT) {
+            VkBuffer buffer;
+            VkDeviceMemory memory;
 
-        DVR_RESULT(dvr_none)
-        result = dvr_vk_create_buffer(
-            desc->data.size,
-            VK_BUFFER_USAGE_TRANSFER_SRC_BIT,
-            VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
-            &src_buffer,
-            &src_memory
-        );
-        DVR_BUBBLE_INTO(dvr_buffer, result);
+            DVR_RESULT(dvr_none)
+            result = dvr_vk_create_buffer(
+                desc->data.size,
+                VK_BUFFER_USAGE_TRANSFER_SRC_BIT,
+                VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
+                &buffer,
+                &memory
+            );
+            DVR_BUBBLE_INTO(dvr_buffer, result);
 
-        void* mapped;
-        if (desc->data.base != NULL) {
-            vkMapMemory(DVR_DEVICE, src_memory, 0, desc->data.size, 0, &mapped);
+            void* mapped;
+            vkMapMemory(DVR_DEVICE, memory, 0, desc->data.size, 0, &mapped);
             memcpy(mapped, desc->data.base, desc->data.size);
-            vkUnmapMemory(DVR_DEVICE, src_memory);
+            vkUnmapMemory(DVR_DEVICE, memory);
+
+            dvr_buffer_data buf = {
+                .vk.buffer = buffer,
+                .vk.memory = memory,
+                .vk.memmap = NULL,
+                .lifecycle = desc->lifecycle,
+            };
+
+            u16 free_slot =
+                dvr_find_free_slot(g_dvr_state.res.buffer_usage_map, DVR_MAX_BUFFERS);
+            g_dvr_state.res.buffers[free_slot] = buf;
+            dvr_set_slot_used(g_dvr_state.res.buffer_usage_map, free_slot);
+
+            return DVR_OK(dvr_buffer, (dvr_buffer){ .id = free_slot });
+        } else {
+            VkBuffer src_buffer;
+            VkDeviceMemory src_memory;
+
+            DVR_RESULT(dvr_none)
+            result = dvr_vk_create_buffer(
+                desc->data.size,
+                VK_BUFFER_USAGE_TRANSFER_SRC_BIT,
+                VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
+                &src_buffer,
+                &src_memory
+            );
+            DVR_BUBBLE_INTO(dvr_buffer, result);
+
+            void* mapped;
+            if (desc->data.base != NULL) {
+                vkMapMemory(DVR_DEVICE, src_memory, 0, desc->data.size, 0, &mapped);
+                memcpy(mapped, desc->data.base, desc->data.size);
+                vkUnmapMemory(DVR_DEVICE, src_memory);
+            }
+
+            VkBuffer dst_buffer;
+            VkDeviceMemory dst_memory;
+
+            result = dvr_vk_create_buffer(
+                desc->data.size,
+                VK_BUFFER_USAGE_TRANSFER_DST_BIT | usage,
+                VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT,
+                &dst_buffer,
+                &dst_memory
+            );
+            DVR_BUBBLE_INTO(dvr_buffer, result);
+
+            // copy data to buffer
+            dvr_vk_copy_buffer(src_buffer, dst_buffer, (VkDeviceSize)desc->data.size);
+
+            dvr_buffer_data buf = {
+                .vk.buffer = dst_buffer,
+                .vk.memory = dst_memory,
+                .vk.memmap = NULL,
+                .lifecycle = desc->lifecycle,
+            };
+
+            u16 free_slot =
+                dvr_find_free_slot(g_dvr_state.res.buffer_usage_map, DVR_MAX_BUFFERS);
+            g_dvr_state.res.buffers[free_slot] = buf;
+            dvr_set_slot_used(g_dvr_state.res.buffer_usage_map, free_slot);
+
+            vkDestroyBuffer(DVR_DEVICE, src_buffer, NULL);
+            vkFreeMemory(DVR_DEVICE, src_memory, NULL);
+
+            return DVR_OK(dvr_buffer, (dvr_buffer){ .id = free_slot });
         }
-
-        VkBuffer dst_buffer;
-        VkDeviceMemory dst_memory;
-
-        result = dvr_vk_create_buffer(
-            desc->data.size,
-            VK_BUFFER_USAGE_TRANSFER_DST_BIT | usage,
-            VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT,
-            &dst_buffer,
-            &dst_memory
-        );
-        DVR_BUBBLE_INTO(dvr_buffer, result);
-
-        // copy data to buffer
-        dvr_vk_copy_buffer(src_buffer, dst_buffer, (VkDeviceSize)desc->data.size);
-
-        dvr_buffer_data buf = {
-            .vk.buffer = dst_buffer,
-            .vk.memory = dst_memory,
-            .vk.memmap = NULL,
-            .lifecycle = desc->lifecycle,
-        };
-
-        u16 free_slot = dvr_find_free_slot(g_dvr_state.res.buffer_usage_map, DVR_MAX_BUFFERS);
-        g_dvr_state.res.buffers[free_slot] = buf;
-        dvr_set_slot_used(g_dvr_state.res.buffer_usage_map, free_slot);
-
-        vkDestroyBuffer(DVR_DEVICE, src_buffer, NULL);
-        vkFreeMemory(DVR_DEVICE, src_memory, NULL);
-
-        return DVR_OK(dvr_buffer, (dvr_buffer){ .id = free_slot });
     } else {
         VkBuffer buffer;
         VkDeviceMemory memory;
@@ -420,18 +462,27 @@ static DVR_RESULT(dvr_buffer) dvr_vk_create_dynamic_buffer(dvr_buffer_desc* desc
     VkDeviceMemory memory;
 
     VkBufferUsageFlags usage = 0;
-    switch (desc->usage) {
-        case DVR_BUFFER_USAGE_VERTEX:
-            usage = VK_BUFFER_USAGE_VERTEX_BUFFER_BIT;
-            break;
-        case DVR_BUFFER_USAGE_INDEX:
-            usage = VK_BUFFER_USAGE_INDEX_BUFFER_BIT;
-            break;
-        case DVR_BUFFER_USAGE_UNIFORM:
-            usage = VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT;
-            break;
-        default:
-            return DVR_ERROR(dvr_buffer, "unknown buffer usage");
+    if (desc->usage & DVR_BUFFER_USAGE_VERTEX) {
+        usage |= VK_BUFFER_USAGE_VERTEX_BUFFER_BIT;
+    }
+    if (desc->usage & DVR_BUFFER_USAGE_INDEX) {
+        usage |= VK_BUFFER_USAGE_INDEX_BUFFER_BIT;
+    }
+    if (desc->usage & DVR_BUFFER_USAGE_UNIFORM) {
+        usage |= VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT;
+    }
+    if (desc->usage & DVR_BUFFER_USAGE_STORAGE) {
+        usage |= VK_BUFFER_USAGE_STORAGE_BUFFER_BIT;
+    }
+    if (desc->usage & DVR_BUFFER_USAGE_TRANSFER_SRC) {
+        usage |= VK_BUFFER_USAGE_TRANSFER_SRC_BIT;
+    }
+    if (desc->usage & DVR_BUFFER_USAGE_TRANSFER_DST) {
+        usage |= VK_BUFFER_USAGE_TRANSFER_DST_BIT;
+    }
+
+    if (desc->usage == 0) {
+        return DVR_ERROR(dvr_buffer, "buffer usage must be specified");
     }
 
     DVR_RESULT(dvr_none)
@@ -495,6 +546,28 @@ void dvr_write_buffer(dvr_buffer buffer, dvr_range new_data, u32 offset) {
     }
 
     memcpy(((u8*)buf->vk.memmap + offset), new_data.base, new_data.size);
+}
+
+void dvr_copy_buffer(dvr_buffer src, dvr_buffer dst, u32 src_offset, u32 dst_offset, u32 size) {
+    dvr_buffer_data* src_buf = dvr_get_buffer_data(src);
+    dvr_buffer_data* dst_buf = dvr_get_buffer_data(dst);
+
+    if (src_buf->vk.buffer == VK_NULL_HANDLE || dst_buf->vk.buffer == VK_NULL_HANDLE) {
+        DVRLOG_ERROR("cannot copy from or to invalid buffer");
+        return;
+    }
+
+    VkCommandBuffer command_buffer = dvr_vk_begin_transient_commands();
+
+    VkBufferCopy copy_region = {
+        .size = size,
+        .srcOffset = src_offset,
+        .dstOffset = dst_offset,
+    };
+
+    vkCmdCopyBuffer(command_buffer, src_buf->vk.buffer, dst_buf->vk.buffer, 1, &copy_region);
+
+    dvr_vk_end_transient_commands(command_buffer);
 }
 
 void dvr_bind_vertex_buffer(dvr_buffer buffer, u32 binding) {
@@ -1742,6 +1815,23 @@ void dvr_destroy_pipeline(dvr_pipeline pipeline) {
 void dvr_bind_pipeline(dvr_pipeline pipeline) {
     dvr_pipeline_data* data = dvr_get_pipeline_data(pipeline);
     vkCmdBindPipeline(DVR_COMMAND_BUFFER, VK_PIPELINE_BIND_POINT_GRAPHICS, data->vk.pipeline);
+}
+
+void dvr_push_constants(
+    dvr_pipeline pipeline,
+    VkShaderStageFlags stage,
+    u32 offset,
+    dvr_range data
+) {
+    dvr_pipeline_data* data_pipeline = dvr_get_pipeline_data(pipeline);
+    vkCmdPushConstants(
+        DVR_COMMAND_BUFFER,
+        data_pipeline->vk.layout,
+        stage,
+        offset,
+        (u32)data.size,
+        data.base
+    );
 }
 
 // DVR_FRAMEBUFFER FUNCTIONS

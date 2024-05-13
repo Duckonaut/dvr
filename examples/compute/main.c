@@ -174,6 +174,8 @@ typedef struct app_state {
     f32 random_steer;
     f32 sensor_angle;
     f32 sensor_distance;
+
+    f32 hue;
 } app_state;
 
 static app_state g_app_state;
@@ -181,6 +183,7 @@ static app_state g_app_state;
 typedef struct particle {
     vec2 position;
     float angle;
+    float _padding; // std140 padding
 } particle;
 
 typedef struct diffuse_push_constants {
@@ -199,6 +202,10 @@ typedef struct particle_push_constants {
     f32 sensor_angle;
     f32 sensor_distance;
 } particle_push_constants;
+
+typedef struct render_push_constants {
+    f32 hue;
+} render_push_constants;
 
 #define NUM_PARTICLES 0x100000
 
@@ -246,13 +253,14 @@ static DVR_RESULT(dvr_none) app_setup(void) {
     vec2 center = { APP_WINDOW_WIDTH / 2.0f, APP_WINDOW_HEIGHT / 2.0f };
     for (u32 i = 0; i < NUM_PARTICLES; i++) {
         particle_data[i].angle = randfr(0.0f, 6.28f);
-        particle_data[i].position[0] = center[0] + cosf(particle_data[i].angle) * randfr(0.0f, 100.0f);
-        particle_data[i].position[1] = center[1] + sinf(particle_data[i].angle) * randfr(0.0f, 100.0f);
+        f32 radius = randfr(0.0f, 100.0f);
+        particle_data[i].position[0] = center[0] + cosf(particle_data[i].angle) * radius;
+        particle_data[i].position[1] = center[1] + sinf(particle_data[i].angle) * radius;
     }
 
     DVR_RESULT(dvr_buffer)
     storage_buffer_res = dvr_create_buffer(&(dvr_buffer_desc){
-        .usage = DVR_BUFFER_USAGE_STORAGE,
+        .usage = DVR_BUFFER_USAGE_STORAGE | DVR_BUFFER_USAGE_TRANSFER_DST,
         .data =
             (dvr_range){
                 .base = particle_data,
@@ -267,7 +275,7 @@ static DVR_RESULT(dvr_none) app_setup(void) {
 
     DVR_RESULT(dvr_buffer)
     storage_buffer_res_2 = dvr_create_buffer(&(dvr_buffer_desc){
-        .usage = DVR_BUFFER_USAGE_STORAGE,
+        .usage = DVR_BUFFER_USAGE_STORAGE | DVR_BUFFER_USAGE_TRANSFER_DST,
         .data = (dvr_range){ .size = sizeof(particle) * NUM_PARTICLES },
         .lifecycle = DVR_BUFFER_LIFECYCLE_STATIC,
     });
@@ -539,7 +547,15 @@ static DVR_RESULT(dvr_none) app_setup(void) {
         .layout = {
             .num_desc_set_layouts = 1,
             .desc_set_layouts = &g_app_state.descriptor_set_layout,
-            .num_push_constant_ranges = 0,
+            .num_push_constant_ranges = 1,
+            .push_constant_ranges =
+                (VkPushConstantRange[]){
+                    (VkPushConstantRange){
+                        .stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT,
+                        .offset = 0,
+                        .size = sizeof(render_push_constants),
+                    },
+                },
         },
         .num_stages = 2,
         .stages = (dvr_pipeline_stage_desc[]){
@@ -712,6 +728,39 @@ static void app_compute(void) {
     dvr_dispatch_compute(NUM_PARTICLES / 256, 1, 1);
 }
 
+static void reset_particles(void) {
+    particle* particle_data = malloc(sizeof(particle) * NUM_PARTICLES);
+
+    vec2 center = { APP_WINDOW_WIDTH / 2.0f, APP_WINDOW_HEIGHT / 2.0f };
+
+    for (u32 i = 0; i < NUM_PARTICLES; i++) {
+        particle_data[i].angle = randfr(0.0f, 6.28f);
+        f32 radius = randfr(0.0f, 100.0f);
+        particle_data[i].position[0] = center[0] + cosf(particle_data[i].angle) * radius;
+        particle_data[i].position[1] = center[1] + sinf(particle_data[i].angle) * radius;
+    }
+
+    DVR_RESULT(dvr_buffer)
+    copy_src_res = dvr_create_buffer(&(dvr_buffer_desc){
+        .usage = DVR_BUFFER_USAGE_TRANSFER_SRC,
+        .data =
+            (dvr_range){
+                .base = particle_data,
+                .size = sizeof(particle) * NUM_PARTICLES,
+            },
+        .lifecycle = DVR_BUFFER_LIFECYCLE_STATIC,
+    });
+    DVR_EXIT_ON_ERROR(copy_src_res);
+
+    dvr_buffer copy_src = DVR_UNWRAP(copy_src_res);
+
+    for (u8 i = 0; i < 2; i++) {
+        dvr_copy_buffer(copy_src, g_app_state.particle_buffers[i], 0, 0, sizeof(particle) * NUM_PARTICLES);
+    }
+
+    dvr_destroy_buffer(copy_src);
+}
+
 static void app_draw(void) {
     dvr_begin_swapchain_render_pass();
 
@@ -719,6 +768,18 @@ static void app_draw(void) {
     dvr_bind_descriptor_set(
         g_app_state.pipeline,
         g_app_state.descriptor_sets[(g_app_state.frame_count - 1) % 2]
+    );
+    dvr_push_constants(
+        g_app_state.pipeline,
+        VK_SHADER_STAGE_FRAGMENT_BIT,
+        0,
+        (dvr_range){
+            .base =
+                &(render_push_constants){
+                    .hue = g_app_state.hue,
+                },
+            .size = sizeof(render_push_constants),
+        }
     );
     vkCmdDraw(dvr_command_buffer(), 3, 1, 0, 0);
 
@@ -749,12 +810,27 @@ static void app_draw_imgui(void) {
         igSliderFloat("turn speed", &g_app_state.turn_speed, 0.0f, 200.0f, "%.3f", 1.0f);
         igSliderFloat("random steer", &g_app_state.random_steer, 0.0f, 200.0f, "%.3f", 1.0f);
         igSliderFloat("sensor angle", &g_app_state.sensor_angle, 0.0f, 6.28f, "%.3f", 1.0f);
-        igSliderFloat("sensor distance", &g_app_state.sensor_distance, 0.0f, 100.0f, "%.3f", 1.0f);
+        igSliderFloat(
+            "sensor distance",
+            &g_app_state.sensor_distance,
+            0.0f,
+            100.0f,
+            "%.3f",
+            1.0f
+        );
     }
 
     if (igCollapsingHeader_TreeNodeFlags("diffuse", 0)) {
-        igSliderFloat("blur strength", &g_app_state.blur_strength, 0.0f, 0.1f, "%.3f", 1.0f);
-        igSliderFloat("decay", &g_app_state.decay, 0.0f, 0.01f, "%.4f", 1.0f);
+        igSliderFloat("blur strength", &g_app_state.blur_strength, 0.0f, 0.25f, "%.3f", 1.0f);
+        igSliderFloat("decay", &g_app_state.decay, 0.0f, 0.025f, "%.4f", 1.0f);
+    }
+
+    if (igCollapsingHeader_TreeNodeFlags("render", 0)) {
+        igSliderFloat("hue", &g_app_state.hue, 0.0f, 360.0f, "%.1f", 1.0f);
+    }
+
+    if (igButton("reset", (ImVec2){ 0, 0 })) {
+        reset_particles();
     }
 
     igEnd();

@@ -45,6 +45,7 @@ DVR_RESULT_DEF(dvr_buffer);
 DVR_RESULT(dvr_buffer) dvr_create_buffer(dvr_buffer_desc* desc);
 void dvr_destroy_buffer(dvr_buffer buffer);
 void dvr_write_buffer(dvr_buffer buffer, dvr_range data, u32 offset);
+void dvr_copy_buffer(dvr_buffer src, dvr_buffer dst, u32 src_offset, u32 dst_offset, u32 size);
 void dvr_bind_vertex_buffer(dvr_buffer buffer, u32 binding);
 void dvr_bind_index_buffer(dvr_buffer buffer, VkIndexType index_type);
 void dvr_bind_uniform_buffer(dvr_buffer buffer, u32 binding);
@@ -291,6 +292,7 @@ DVR_RESULT(dvr_pipeline) dvr_create_pipeline(dvr_pipeline_desc* desc);
 void dvr_destroy_pipeline(dvr_pipeline pipeline);
 
 void dvr_bind_pipeline(dvr_pipeline pipeline);
+void dvr_push_constants(dvr_pipeline pipeline, VkShaderStageFlags stage, u32 offset, dvr_range data);
 
 typedef struct dvr_framebuffer_desc {
     dvr_render_pass render_pass;
