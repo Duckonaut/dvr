@@ -78,6 +78,7 @@ vulkan_deps = [
 
 deps = [
   dependency('glfw3', required : true, static : static_link_libs),
+  subproject('cglm', default_options : ['default_library=static']).get_variable('cglm_dep'),
   vulkan_deps,
   platform_deps,
   buildtype_deps,

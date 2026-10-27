@@ -199,8 +199,9 @@ static void dvr_set_slot_free(u64* usage_map, u16 slot) {
     usage_map[slot / 64] &= ~(1ULL << (slot % 64));
 }
 
-static DVR_RESULT(u32)
-    dvr_vk_find_memory_type(u32 type_filter, VkMemoryPropertyFlags properties) {
+static DVR_RESULT(
+    u32
+) dvr_vk_find_memory_type(u32 type_filter, VkMemoryPropertyFlags properties) {
     VkPhysicalDeviceMemoryProperties mem_props;
     vkGetPhysicalDeviceMemoryProperties(g_dvr_state.vk.physical_device, &mem_props);
 
@@ -663,27 +664,31 @@ static void dvr_vk_transition_image_layout(
 
         src_stage = VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT;
         dst_stage = VK_PIPELINE_STAGE_TRANSFER_BIT;
-    } else if (old_layout == VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL && new_layout == VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL) {
+    } else if (old_layout == VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL &&
+               new_layout == VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL) {
         barrier.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
         barrier.dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
 
         src_stage = VK_PIPELINE_STAGE_TRANSFER_BIT;
         dst_stage = VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT;
-    } else if (old_layout == VK_IMAGE_LAYOUT_UNDEFINED && new_layout == VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL) {
+    } else if (old_layout == VK_IMAGE_LAYOUT_UNDEFINED &&
+               new_layout == VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL) {
         barrier.srcAccessMask = 0;
         barrier.dstAccessMask = VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_READ_BIT |
                                 VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT;
 
         src_stage = VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT;
         dst_stage = VK_PIPELINE_STAGE_EARLY_FRAGMENT_TESTS_BIT;
-    } else if (old_layout == VK_IMAGE_LAYOUT_UNDEFINED && new_layout == VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL) {
+    } else if (old_layout == VK_IMAGE_LAYOUT_UNDEFINED &&
+               new_layout == VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL) {
         barrier.srcAccessMask = 0;
         barrier.dstAccessMask =
             VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT | VK_ACCESS_COLOR_ATTACHMENT_READ_BIT;
 
         src_stage = VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT;
         dst_stage = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT;
-    } else if (old_layout == VK_IMAGE_LAYOUT_UNDEFINED && new_layout == VK_IMAGE_LAYOUT_GENERAL) {
+    } else if (old_layout == VK_IMAGE_LAYOUT_UNDEFINED &&
+               new_layout == VK_IMAGE_LAYOUT_GENERAL) {
         barrier.srcAccessMask = 0;
         barrier.dstAccessMask = VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT;
 
@@ -744,8 +749,9 @@ static void dvr_vk_copy_buffer_to_image(VkBuffer buffer, VkImage image, u32 widt
 
 DVR_RESULT_DEF(VkImageView);
 
-static DVR_RESULT(VkImageView)
-    dvr_vk_create_image_view(VkImage image, VkFormat format, u32 mip_levels) {
+static DVR_RESULT(
+    VkImageView
+) dvr_vk_create_image_view(VkImage image, VkFormat format, u32 mip_levels) {
     VkImageAspectFlags aspect = 0;
     switch (format) {
         case VK_FORMAT_D16_UNORM:
@@ -2159,8 +2165,8 @@ static void dvr_vk_create_debug_messenger(void) {
     };
 
     PFN_vkCreateDebugUtilsMessengerEXT vkCreateDebugUtilsMessengerEXT =
-        (PFN_vkCreateDebugUtilsMessengerEXT
-        )vkGetInstanceProcAddr(g_dvr_state.vk.instance, "vkCreateDebugUtilsMessengerEXT");
+        (PFN_vkCreateDebugUtilsMessengerEXT)
+            vkGetInstanceProcAddr(g_dvr_state.vk.instance, "vkCreateDebugUtilsMessengerEXT");
     if (vkCreateDebugUtilsMessengerEXT == NULL) {
         DVRLOG_ERROR("vkCreateDebugUtilsMessengerEXT is NULL");
         return;
@@ -3053,8 +3059,10 @@ static void dvr_vk_shutdown(void) {
 
     if (DVR_ENABLE_VALIDATION_LAYERS) {
         PFN_vkDestroyDebugUtilsMessengerEXT vkDestroyDebugUtilsMessengerEXT =
-            (PFN_vkDestroyDebugUtilsMessengerEXT
-            )vkGetInstanceProcAddr(g_dvr_state.vk.instance, "vkDestroyDebugUtilsMessengerEXT");
+            (PFN_vkDestroyDebugUtilsMessengerEXT)vkGetInstanceProcAddr(
+                g_dvr_state.vk.instance,
+                "vkDestroyDebugUtilsMessengerEXT"
+            );
         if (vkDestroyDebugUtilsMessengerEXT != NULL) {
             vkDestroyDebugUtilsMessengerEXT(
                 g_dvr_state.vk.instance,
@@ -3338,7 +3346,7 @@ void dvr_get_window_size(u32* width, u32* height) {
 
 #define CIMGUI_USE_VULKAN
 #define CIMGUI_USE_GLFW
-#include <generator/output/cimgui_impl.h>
+#include <cimgui_impl.h>
 
 #define _DVR_MAX_IMGUI_DESCRIPTOR_SETS 100
 
@@ -3391,7 +3399,7 @@ static const VkDescriptorPoolSize k_imgui_pool_sizes[] = {
 
 DVR_RESULT(dvr_none) dvr_imgui_setup(void) {
     igCreateContext(NULL);
-    ImGuiIO* io = igGetIO();
+    ImGuiIO* io = igGetIO_Nil();
     io->ConfigFlags |= ImGuiConfigFlags_DockingEnable;
 
     ImGui_ImplGlfw_InitForVulkan(g_dvr_state.window.window, true);
@@ -3425,9 +3433,11 @@ DVR_RESULT(dvr_none) dvr_imgui_setup(void) {
         .DescriptorPool = g_dvr_state.imgui.pool,
         .MinImageCount = 2,
         .ImageCount = (u32)arrlenu(g_dvr_state.vk.swapchain_images),
-        .MSAASamples = g_dvr_state.vk.max_msaa_samples,
-        .RenderPass = swapchain_render_pass,
-        .Subpass = 0,
+        .PipelineInfoMain = {
+            .MSAASamples = g_dvr_state.vk.max_msaa_samples,
+            .RenderPass = swapchain_render_pass,
+            .Subpass = 0,
+        },
     };
 
     if (!ImGui_ImplVulkan_Init(&init_info)) {
